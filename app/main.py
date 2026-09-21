@@ -198,13 +198,16 @@ async def lifespan(app: FastAPI):
     logger.info(f"Talos Cloud starting in {settings.talos_env} mode (Engine v3)")
 
     _engine = get_engine()
-    if settings.talos_env in ("development", "test"):
-        async with _engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+    try:
+        if settings.talos_env in ("development", "test"):
+            async with _engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
 
-    await _seed_v3_tables()
-    await _seed_admin_accounts()
-    await _clean_mock_skills()
+        await _seed_v3_tables()
+        await _seed_admin_accounts()
+        await _clean_mock_skills()
+    except Exception as exc:
+        logger.error("Error during startup database seeding: %s", exc, exc_info=True)
 
     scheduler = None
     if os.environ.get("ENABLE_LEGACY_APSCHEDULER", "false").lower() in ("true", "1"):
@@ -215,15 +218,24 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("Background jobs managed durably via Inngest (/api/inngest)")
 
-    from app.infrastructure.redis_client import init_redis_pool, close_redis_pool
-    await init_redis_pool()
+    try:
+        from app.infrastructure.redis_client import init_redis_pool, close_redis_pool
+        await init_redis_pool()
+    except Exception as exc:
+        logger.error("Error initializing Redis pool on startup: %s", exc, exc_info=True)
 
     yield
 
     if scheduler is not None:
         scheduler.shutdown()
-    await close_redis_pool()
-    await _engine.dispose()
+    try:
+        await close_redis_pool()
+    except Exception:
+        pass
+    try:
+        await _engine.dispose()
+    except Exception:
+        pass
     logger.info("Talos Cloud shut down")
 
 
