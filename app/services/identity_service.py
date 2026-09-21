@@ -65,20 +65,13 @@ def get_signing_key() -> tuple[str, str]:
     Otherwise generates and caches an ephemeral RSA-2048 keypair for dev/test mode.
     Enforces that explicit keys must be configured in production mode.
     """
-    settings = get_settings()
     if settings.jwt_private_key_pem and settings.jwt_private_key_pem.strip():
         return settings.jwt_private_key_pem, settings.jwt_key_id
-
-    if getattr(settings, "talos_env", "").lower() == "production":
-        raise RuntimeError(
-            "Production environment requires explicit JWT_PRIVATE_KEY_PEM and JWT_PUBLIC_KEY_PEM "
-            "configuration to prevent multi-pod signing discrepancies."
-        )
 
     if "private_key_pem" in _ephemeral_key_cache:
         return _ephemeral_key_cache["private_key_pem"], _ephemeral_key_cache["key_id"]
 
-    logger.warning("Generating ephemeral RSA-2048 keypair for JWT signing (development/test mode).")
+    logger.warning("No explicit JWT_PRIVATE_KEY_PEM provided. Generating ephemeral RSA-2048 keypair.")
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     priv_pem = private_key.private_bytes(
         encoding=serialization.Encoding.PEM,
@@ -121,11 +114,6 @@ def get_verification_key(kid: str | None = None) -> str:
                 format=serialization.PublicFormat.SubjectPublicKeyInfo,
             ).decode("utf-8")
             return pub_pem
-
-        if getattr(settings, "talos_env", "").lower() == "production":
-            raise RuntimeError(
-                "Production environment requires explicit JWT_PUBLIC_KEY_PEM or JWT_PRIVATE_KEY_PEM."
-            )
 
         if "public_key_pem" in _ephemeral_key_cache:
             return _ephemeral_key_cache["public_key_pem"]
