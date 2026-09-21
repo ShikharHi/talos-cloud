@@ -482,7 +482,9 @@ async def exchange_google_code(code: str) -> dict[str, Any]:
 
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.post(token_url, data=data)
-        resp.raise_for_status()
+        if resp.status_code != 200:
+            logger.error("Google token exchange failed [%s]: %s", resp.status_code, resp.text)
+            raise AccountLinkingError(f"Google token exchange failed ({resp.status_code}): {resp.text}")
         token_data = resp.json()
 
         id_token = token_data.get("id_token")
