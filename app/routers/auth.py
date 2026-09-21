@@ -264,15 +264,19 @@ class GoogleCallbackResponse(BaseModel):
     role: str
 
 
-# ─── Google OAuth Endpoints ───────────────────────────────────────────────────
-
 @router.get(
     "/google/login",
     dependencies=[Depends(rate_limiter(max_requests=30, window_seconds=60, key_prefix="google_login"))],
 )
-async def google_login(state: Optional[str] = None, prompt: Optional[str] = "select_account"):
-    """Returns the Google OAuth 2.0 consent screen redirect URL."""
+async def google_login(
+    state: Optional[str] = None,
+    prompt: Optional[str] = "select_account",
+    redirect: bool = False,
+):
+    """Returns the Google OAuth 2.0 consent screen redirect URL or redirects directly."""
     auth_url = identity_service.get_google_auth_url(state=state, prompt=prompt or "select_account")
+    if redirect:
+        return RedirectResponse(url=auth_url, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
     return {"auth_url": auth_url}
 
 
