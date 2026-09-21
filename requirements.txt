@@ -19,3 +19,4 @@ pyyaml>=6.0
 boto3>=1.34.0
 redis>=5.0.0
 inngest>=0.5.19
+python-multipart>=0.0.9
