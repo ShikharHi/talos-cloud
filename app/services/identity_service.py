@@ -65,6 +65,7 @@ def get_signing_key() -> tuple[str, str]:
     Otherwise generates and caches an ephemeral RSA-2048 keypair for dev/test mode.
     Enforces that explicit keys must be configured in production mode.
     """
+    settings = get_settings()
     if settings.jwt_private_key_pem and settings.jwt_private_key_pem.strip():
         return settings.jwt_private_key_pem, settings.jwt_key_id
 
