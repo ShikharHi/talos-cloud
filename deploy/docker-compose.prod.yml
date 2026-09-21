@@ -1,0 +1,63 @@
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_started
+    networks:
+      - talos-net
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
+    environment:
+      - TALOS_ENV=production
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=redis://redis-core:6379/0
+      - REDIS_CORE_URL=redis://redis-core:6379/0
+      - INNGEST_EVENT_KEY=${INNGEST_EVENT_KEY}
+      - INNGEST_SIGNING_KEY=${INNGEST_SIGNING_KEY}
+      - JWT_SECRET=${JWT_SECRET}
+      - JWT_PRIVATE_KEY_PEM=${JWT_PRIVATE_KEY_PEM}
+      - JWT_PUBLIC_KEY_PEM=${JWT_PUBLIC_KEY_PEM}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
+      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET}
+      - TIGRIS_ACCESS_KEY_ID=${TIGRIS_ACCESS_KEY_ID}
+      - TIGRIS_SECRET_ACCESS_KEY=${TIGRIS_SECRET_ACCESS_KEY}
+      - TIGRIS_ENDPOINT_URL=${TIGRIS_ENDPOINT_URL:-https://t3.storage.dev}
+      - TIGRIS_BUCKET_NAME=${TIGRIS_BUCKET_NAME:-talos-marketplace}
+    depends_on:
+      redis-core:
+        condition: service_started
+    networks:
+      - talos-net
+
+  redis-core:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "512mb", "--maxmemory-policy", "volatile-lru"]
+    networks:
+      - talos-net
+
+networks:
+  talos-net:
+    driver: bridge
+
+volumes:
+  caddy_data:
+  caddy_config:

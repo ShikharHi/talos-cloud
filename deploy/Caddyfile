@@ -1,0 +1,34 @@
+# Talos Cloud — Production Caddy Configuration
+# Handles HTTPS termination, automated Let's Encrypt certificates, reverse proxying,
+# and SSE streaming buffer bypass for real-time agent output.
+
+{$TALOS_DOMAIN:cloud.talos.ai} {
+    encode zstd gzip
+
+    # SSE Streaming endpoints: low-latency immediate flushing and long-lived timeouts
+    @sse {
+        path /api/v1/llm/stream*
+        path /relay/stream*
+        path /v1/chat/completions*
+        path /v1/llm/chat/completions*
+    }
+    handle @sse {
+        reverse_proxy api:8000 {
+            flush_interval -1
+            stream_timeout 600s
+            stream_close_delay 5s
+            transport http {
+                response_header_timeout 600s
+            }
+        }
+    }
+
+    # Standard Control Plane APIs & Webhooks
+    handle {
+        reverse_proxy api:8000 {
+            transport http {
+                response_header_timeout 60s
+            }
+        }
+    }
+}

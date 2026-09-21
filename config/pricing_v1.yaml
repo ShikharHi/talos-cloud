@@ -1,0 +1,66 @@
+# Production-grade pricing schedule — v1
+# 10 Credits = $1.00 USD = ₹84.00 INR (1 Credit = $0.10 USD = ₹8.40 INR)
+#
+# Formula:
+#   schedule_price = max(cost / (1 - target_margin), cost + absolute_min_margin)
+#
+# capability_id values are ABSTRACT — they never map 1:1 to a provider name.
+# The provider mapping lives exclusively in relay_service.py (server-side only).
+
+version: "v1"
+effective_from: "2026-01-01T00:00:00Z"
+published_by: "system"
+
+capabilities:
+  reasoning_model:
+    unit: per_1k_tokens
+    credits: 0.10         # 0.10 credits per 1k tokens (1 Credit = 10k tokens = $0.10) — Anthropic Sonnet / GPT-4o
+    target_margin: 0.45   # 42.5% net profit after hosting & fees
+
+  code_model:
+    unit: per_1k_tokens
+    credits: 0.05         # 0.05 credits per 1k tokens (1 Credit = 20k tokens = $0.10) — DeepSeek V3 / Qwen 2.5
+    target_margin: 0.50   # 54.0% net profit after hosting & fees
+
+  vision_model:
+    unit: per_1k_tokens
+    credits: 0.08         # 0.08 credits per 1k tokens (1 Credit = 12.5k tokens = $0.10) — GLM-4V / GPT-4o Vision
+    target_margin: 0.45   # 49.8% net profit after hosting & fees
+
+  fast_model:
+    unit: per_1k_tokens
+    credits: 0.02         # 0.02 credits per 1k tokens (1 Credit = 50k tokens = $0.10) — Groq Llama 3.3 / Gemini Flash
+    target_margin: 0.65   # 71.0% net profit after hosting & fees
+
+  web_search:
+    unit: per_call
+    credits: 0.15         # 0.15 credits per call ($0.015 / search) — Tavily Search
+    target_margin: 0.45   # 38.7% net profit after hosting & fees
+
+  browser_use:
+    unit: per_minute
+    credits: 0.25         # 0.25 credits per minute ($0.025 / min) — Sandboxed Chromium
+    target_margin: 0.50   # 54.0% net profit after hosting & fees
+
+  image_gen:
+    unit: per_call
+    credits: 0.50         # 0.50 credits per image ($0.050 / image) — Flux Pro / CogView
+    target_margin: 0.40   # 31.0% net profit after hosting & fees
+
+subscription_tiers:
+  free:
+    price_usd: 0
+    monthly_credits: 50   # $5.00 nominal value (free trial acquisition)
+  plus:
+    price_usd: 19
+    monthly_credits: 220  # $22.00 nominal value (65.0% target net profit)
+  pro:
+    price_usd: 29
+    monthly_credits: 350  # $35.00 nominal value (65.0% target net profit)
+  pro_plus:
+    price_usd: 49
+    monthly_credits: 600  # $60.00 nominal value (65.0% target net profit)
+  ultra:
+    price_usd: 99
+    monthly_credits: 1300 # $130.00 nominal value (65.0% target net profit)
+

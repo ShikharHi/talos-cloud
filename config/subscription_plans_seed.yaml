@@ -1,0 +1,44 @@
+# Subscription plan definitions — seeded into subscription_plans table at startup.
+# Target: 70-80% gross margin across paid tiers (operating target: 75%).
+# Monthly work credits are calibrated so that 100% consumption yields 75% contribution margin.
+
+plans:
+  - name: free
+    price_usd: 0
+    monthly_credits: 50       # Acquisition tier (free work units)
+    reset_period_days: 30
+    topup_allowed: false
+    active: true
+    version: v1
+
+  - name: plus
+    price_usd: 19
+    monthly_credits: 475      # 475 Talos Work Credits / mo (75% target margin)
+    reset_period_days: 30
+    topup_allowed: true
+    active: true
+    version: v1
+
+  - name: pro
+    price_usd: 29
+    monthly_credits: 725      # 725 Talos Work Credits / mo (75% target margin)
+    reset_period_days: 30
+    topup_allowed: true
+    active: true
+    version: v1
+
+  - name: pro_plus
+    price_usd: 49
+    monthly_credits: 1225     # 1,225 Talos Work Credits / mo (75% target margin)
+    reset_period_days: 30
+    topup_allowed: true
+    active: true
+    version: v1
+
+  - name: ultra
+    price_usd: 99
+    monthly_credits: 2475     # 2,475 Talos Work Credits / mo (75% target margin)
+    reset_period_days: 30
+    topup_allowed: true
+    active: true
+    version: v1

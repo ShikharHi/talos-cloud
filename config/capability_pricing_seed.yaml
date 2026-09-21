@@ -1,0 +1,105 @@
+# Capability credit prices — seeded into capability_pricing table.
+# Formula:
+#   credit_cost = (provider_cost_per_unit / (1 - target_margin)) / credit_reference
+#
+# Target blended margin: 70-80% (operating target: 75%)
+
+version: v1
+credit_reference_usd: 0.10   # internal calibration constant only, never exposed to clients
+
+capability_pricing:
+  # ── reasoning_model ──────────────────────────────────────────────────────────
+  # Provider: Anthropic Sonnet 4.6 / 5 — $3/1M in, $15/1M out
+  - capability_id: reasoning_model
+    unit: input_1k
+    credit_cost: 0.120        # 75% margin on $3.00/1M input
+    target_margin: 0.75
+    pricing_version: v1
+    active: true
+
+  - capability_id: reasoning_model
+    unit: output_1k
+    credit_cost: 0.600        # 75% margin on $15.00/1M output
+    target_margin: 0.75
+    pricing_version: v1
+    active: true
+
+  # ── code_model ───────────────────────────────────────────────────────────────
+  # Provider: DeepSeek V4 Flash/Pro — $0.27/1M in, $1.10/1M out
+  - capability_id: code_model
+    unit: input_1k
+    credit_cost: 0.011        # 75% margin on $0.27/1M input
+    target_margin: 0.75
+    pricing_version: v1
+    active: true
+
+  - capability_id: code_model
+    unit: output_1k
+    credit_cost: 0.044        # 75% margin on $1.10/1M output
+    target_margin: 0.75
+    pricing_version: v1
+    active: true
+
+  # ── fast_model ───────────────────────────────────────────────────────────────
+  # Provider: Groq Llama 3.3 70B — $0.59/1M in, $0.79/1M out
+  - capability_id: fast_model
+    unit: input_1k
+    credit_cost: 0.024        # 75% margin on $0.59/1M input
+    target_margin: 0.75
+    pricing_version: v1
+    active: true
+
+  - capability_id: fast_model
+    unit: output_1k
+    credit_cost: 0.032        # 75% margin on $0.79/1M output
+    target_margin: 0.75
+    pricing_version: v1
+    active: true
+
+  # ── vision_model ─────────────────────────────────────────────────────────────
+  # Provider: Zhipu GLM-4V-Flash — $0.05/1M in+out
+  - capability_id: vision_model
+    unit: input_1k
+    credit_cost: 0.004        # 75% margin on $0.05/1M input
+    target_margin: 0.75
+    pricing_version: v1
+    active: true
+
+  - capability_id: vision_model
+    unit: output_1k
+    credit_cost: 0.004        # 75% margin on $0.05/1M output
+    target_margin: 0.75
+    pricing_version: v1
+    active: true
+
+  # ── web_search ───────────────────────────────────────────────────────────────
+  # Provider: Tavily — $0.008 per call
+  - capability_id: web_search
+    unit: per_call
+    credit_cost: 0.320        # 75% margin on $0.008/call
+    target_margin: 0.75
+    pricing_version: v1
+    active: true
+
+  # ── image_gen ────────────────────────────────────────────────────────────────
+  # Provider: Zhipu CogView / OpenAI — variable by quality
+  - capability_id: image_gen
+    unit: image_low
+    credit_cost: 0.320        # 75% margin on $0.008/image
+    target_margin: 0.75
+    pricing_version: v1
+    active: true
+
+  - capability_id: image_gen
+    unit: image_medium
+    credit_cost: 0.800        # 75% margin on $0.020/image
+    target_margin: 0.75
+    pricing_version: v1
+    active: true
+
+  - capability_id: image_gen
+    unit: image_high
+    credit_cost: 1.600        # 75% margin on $0.040/image
+    target_margin: 0.75
+    pricing_version: v1
+    active: true

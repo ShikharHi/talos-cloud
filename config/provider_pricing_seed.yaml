@@ -1,0 +1,106 @@
+# Provider COGS (cost of goods sold) — INTERNAL ONLY.
+# Source: provider official pricing pages.
+# Never expose these values to clients.
+# All costs in USD per 1M tokens (or per call/image as noted).
+
+provider_pricing:
+  # ── Anthropic ────────────────────────────────────────────────────────────────
+  - provider: anthropic
+    model_id: claude-sonnet-4-6
+    pricing_type: token
+    input_cost_usd_per_1m: 3.00
+    output_cost_usd_per_1m: 15.00
+    cached_input_cost_usd_per_1m: 0.30
+    source_url: https://www.anthropic.com/pricing
+    version: anthropic-2026-08
+    active: true
+
+  - provider: anthropic
+    model_id: claude-sonnet-5
+    pricing_type: token
+    input_cost_usd_per_1m: 3.00
+    output_cost_usd_per_1m: 15.00
+    cached_input_cost_usd_per_1m: 0.30
+    source_url: https://www.anthropic.com/pricing
+    version: anthropic-2026-08
+    active: true
+
+  - provider: anthropic
+    model_id: claude-3-5-sonnet-20241022
+    pricing_type: token
+    input_cost_usd_per_1m: 3.00
+    output_cost_usd_per_1m: 15.00
+    cached_input_cost_usd_per_1m: 0.30
+    source_url: https://www.anthropic.com/pricing
+    version: anthropic-2026-08
+    active: true
+
+  # ── Groq ─────────────────────────────────────────────────────────────────────
+  - provider: groq
+    model_id: llama-3.3-70b-versatile
+    pricing_type: token
+    input_cost_usd_per_1m: 0.59
+    output_cost_usd_per_1m: 0.79
+    source_url: https://console.groq.com/docs/models
+    version: groq-2026-08
+    active: true
+
+  # ── DeepSeek ─────────────────────────────────────────────────────────────────
+  - provider: deepseek
+    model_id: deepseek-v4-flash
+    pricing_type: token
+    input_cost_usd_per_1m: 0.27
+    output_cost_usd_per_1m: 1.10
+    cached_input_cost_usd_per_1m: 0.07
+    source_url: https://api-docs.deepseek.com/quick_start/pricing
+    version: deepseek-2026-08
+    active: true
+
+  - provider: deepseek
+    model_id: deepseek-v4-pro
+    pricing_type: token
+    input_cost_usd_per_1m: 0.27
+    output_cost_usd_per_1m: 1.10
+    cached_input_cost_usd_per_1m: 0.07
+    source_url: https://api-docs.deepseek.com/quick_start/pricing
+    version: deepseek-2026-08
+    active: true
+
+  - provider: deepseek
+    model_id: deepseek-chat
+    pricing_type: token
+    input_cost_usd_per_1m: 0.27
+    output_cost_usd_per_1m: 1.10
+    cached_input_cost_usd_per_1m: 0.07
+    source_url: https://api-docs.deepseek.com/quick_start/pricing
+    version: deepseek-2026-08
+    active: true
+
+  # ── Tavily (Web Search) ───────────────────────────────────────────────────────
+  - provider: tavily
+    model_id: tavily-search
+    pricing_type: call
+    tool_cost_usd: 0.008
+    source_url: https://tavily.com/pricing
+    version: tavily-2026-08
+    active: true
+
+  # ── Zhipu / GLM ──────────────────────────────────────────────────────────────
+  - provider: zhipu
+    model_id: glm-4v-flash
+    pricing_type: token
+    input_cost_usd_per_1m: 0.05
+    output_cost_usd_per_1m: 0.05
+    source_url: https://open.bigmodel.cn/pricing
+    version: zhipu-2026-08
+    active: true
+
+  - provider: zhipu
+    model_id: cogview-4-250304
+    pricing_type: image
+    image_cost_usd_low: 0.008
+    image_cost_usd_medium: 0.020
+    image_cost_usd_high: 0.040
+    source_url: https://open.bigmodel.cn/pricing
+    version: zhipu-2026-08
+    active: true

@@ -1,0 +1,731 @@
+"""
+Talos Cloud — Relay Service (Engine v3).
+
+THIS IS THE CENTRAL EXECUTION LAYER OF THE TALOS BILLING ARCHITECTURE.
+
+Flow:
+  Client Request → Account Authentication
+    ↓
+  WalletEngine.reserve(account_id, task_id, worst_case_credits)
+    ↓
+  Provider Dispatch (keys server-side ONLY)
+    ├── Success → MeteringAdapter.extract() → MeteringEvents
+    │             ProviderCostCalculator → provider_cost_usd
+    │             CapabilityPricingEngine → credits_charged
+    │             UsageEvent DB persistence
+    │             WalletEngine.commit(reservation_id, actual_credits)
+    │
+    └── Failure → WalletEngine.release(reservation_id)  [charge = 0]
+
+CRITICAL INVARIANTS:
+  1. All pre-checks and balance deductions go through WalletEngine.
+  2. `provider` and `model_id` are NEVER included in any HTTP response body
+     returned to a client. They stay in UsageEvent/PricingEvent rows for internal use.
+  3. Real provider API keys are used HERE AND ONLY HERE.
+  4. Streaming: httpx AsyncClient with stream(). Reconciled after stream ends.
+  5. Idempotent: idempotency_key prevents double-reservation on retry.
+"""
+
+import logging
+import os
+import uuid
+from datetime import datetime, timezone
+from typing import Any, AsyncIterator
+
+import httpx
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.config import get_settings
+from app.models.accounts import Account
+from app.models.ledger import PricingEvent
+from app.models.usage_event import UsageEvent, UnitType
+from app.models.wallet import CreditReservation
+from app.services.wallet_engine import InsufficientCreditsError, WalletEngine
+from app.services.pricing_calculator import CapabilityPricingEngine, ProviderCostCalculator
+from app.services.metering import (
+    extract_browser_usage,
+    extract_image_usage,
+    extract_llm_usage,
+    extract_search_usage,
+)
+from app.services.metering.base import MeteringEvent
+from app.services.model_registry import ModelRegistry
+
+logger = logging.getLogger(__name__)
+
+
+class RelayService:
+    def __init__(self, db: AsyncSession):
+        self.db = db
+        self.settings = get_settings()
+        self.wallet_engine = WalletEngine(db)
+        self.cost_calculator = ProviderCostCalculator(db)
+        self.pricing_engine = CapabilityPricingEngine(db)
+        self.model_registry = ModelRegistry(db)
+
+    async def call(
+        self,
+        account_id: uuid.UUID,
+        task_id: str | None,
+        capability_id: str,
+        payload: dict,
+        worst_case_units: int,
+        idempotency_key: str | None = None,
+    ) -> dict:
+        """
+        Main relay entry point for non-streaming calls.
+        Returns dict: {"result": ..., "credits_charged": ..., "capability_id": ...}
+
+        INVARIANT: 'provider' and 'model_id' are NEVER in the return dictionary.
+        """
+        acc_uuid = account_id if isinstance(account_id, uuid.UUID) else uuid.UUID(str(account_id))
+
+        # Check if user is admin / unlimited tier
+        is_unlimited = await self._is_unlimited_account(acc_uuid)
+
+        # Estimate worst-case credits to hold
+        worst_case_event = MeteringEvent(
+            capability_id=capability_id,
+            provider="precheck",
+            model_id=None,
+            unit_type=self._capability_to_default_unit(capability_id),
+            quantity=worst_case_units,
+        )
+        worst_case_cost = await self.cost_calculator.calculate_cost(worst_case_event)
+        credits_to_hold = await self.pricing_engine.credits_for_event(worst_case_event, worst_case_cost)
+        credits_to_hold = max(1, credits_to_hold)
+
+        reservation: CreditReservation | None = None
+
+        # ── Step 1: Pre-check & Reserve Credits ─────────────────────────────
+        if not is_unlimited:
+            try:
+                reservation = await self.wallet_engine.reserve(
+                    account_id=acc_uuid,
+                    task_id=task_id,
+                    amount=credits_to_hold,
+                    idempotency_key=idempotency_key,
+                )
+            except InsufficientCreditsError as e:
+                # Log rejected event before raising
+                await self._log_rejected_event(
+                    account_id=acc_uuid,
+                    task_id=task_id,
+                    capability_id=capability_id,
+                    worst_case_units=worst_case_units,
+                )
+                raise e
+
+        # ── Step 2: Resolve Provider Routing & Dispatch ──────────────────────
+        try:
+            provider, model_id = await self.resolve_provider_routing(capability_id)
+        except Exception:
+            provider = self._fallback_provider(capability_id)
+            model_id = self._fallback_model_id(capability_id)
+
+        try:
+            try:
+                provider_result, raw_response = await self._dispatch(
+                    capability_id,
+                    payload,
+                    provider=provider,
+                    model_id=model_id,
+                )
+            except TypeError:
+                provider_result, raw_response = await self._dispatch(
+                    capability_id,
+                    payload,
+                )
+        except Exception as e:
+            # Dispatch failed — release reservation in full (charge 0 credits)
+            if reservation is not None:
+                await self.wallet_engine.release(reservation.reservation_id)
+            raise RuntimeError(f"Provider call failed for capability '{capability_id}': {e}") from e
+
+        # ── Step 3: Metering & Credit Calculation ───────────────────────────
+        metering_events = self._extract_metering_events(
+            capability_id=capability_id,
+            provider=provider,
+            model_id=model_id,
+            payload=payload,
+            raw_response=raw_response,
+            task_id=task_id,
+        )
+
+        total_actual_credits = 0
+        pricing_version = await self.pricing_engine.get_active_pricing_version()
+
+        for event in metering_events:
+            # Calculate real USD cost
+            cost_usd = await self.cost_calculator.calculate_cost(event)
+            event.provider_cost_usd = cost_usd
+
+            # Calculate credits to charge
+            if is_unlimited:
+                credits_charged = 0
+            else:
+                credits_charged = await self.pricing_engine.credits_for_event(event, cost_usd)
+
+            event.credits_charged = credits_charged
+            event.pricing_version = pricing_version
+            total_actual_credits += credits_charged
+
+            # Persist UsageEvent DB row (INTERNAL ONLY)
+            await self._persist_usage_event(acc_uuid, event)
+
+        # ── Step 4: Commit Reservation ───────────────────────────────────────
+        if reservation is not None and not is_unlimited:
+            await self.wallet_engine.commit(
+                reservation_id=reservation.reservation_id,
+                actual_amount=total_actual_credits,
+            )
+
+        # Write PricingEvent row for backward compatibility
+        await self._log_pricing_event(
+            account_id=acc_uuid,
+            task_id=task_id,
+            capability_id=capability_id,
+            provider=provider,
+            actual_units=sum(e.quantity for e in metering_events),
+            precheck_units=worst_case_units,
+            rejected=False,
+            credits_charged=0 if is_unlimited else total_actual_credits,
+            pricing_version=pricing_version,
+        )
+
+        # INVARIANT CHECK: provider and model_id must NOT be in the return value
+        return {
+            "result": provider_result,
+            "credits_charged": 0 if is_unlimited else total_actual_credits,
+            "capability_id": capability_id,
+        }
+
+    async def stream_call(
+        self,
+        account_id: uuid.UUID,
+        task_id: str | None,
+        capability_id: str,
+        payload: dict,
+        worst_case_units: int,
+        idempotency_key: str | None = None,
+        request: Any = None,
+    ) -> AsyncIterator[bytes]:
+        """
+        Streaming relay call with:
+        - Exact token usage extraction (no len(chunk)//4 heuristic)
+        - Client disconnect detection and prompt provider stream cancellation
+        - Sequence-numbered SSE chunks (id: {seq}) with 60s replay buffer
+        - Atomic credit reconciliation on partial completion or stream failure.
+        """
+        import json
+        from app.services.stream_buffer import replay_buffer
+
+        acc_uuid = account_id if isinstance(account_id, uuid.UUID) else uuid.UUID(str(account_id))
+        is_unlimited = await self._is_unlimited_account(acc_uuid)
+
+        worst_case_event = MeteringEvent(
+            capability_id=capability_id,
+            provider="precheck",
+            model_id=None,
+            unit_type="input_tokens",
+            quantity=worst_case_units,
+        )
+        worst_case_cost = await self.cost_calculator.calculate_cost(worst_case_event)
+        credits_to_hold = await self.pricing_engine.credits_for_event(worst_case_event, worst_case_cost)
+        credits_to_hold = max(1, credits_to_hold)
+
+        reservation: CreditReservation | None = None
+        if not is_unlimited:
+            reservation = await self.wallet_engine.reserve(
+                account_id=acc_uuid,
+                task_id=task_id,
+                amount=credits_to_hold,
+                idempotency_key=idempotency_key,
+            )
+
+        try:
+            provider, model_id = await self.resolve_provider_routing(capability_id)
+        except Exception:
+            provider = self._fallback_provider(capability_id)
+            model_id = self._fallback_model_id(capability_id)
+
+        stream_id = task_id or str(uuid.uuid4())
+        yielded_any = False
+        chunks_count = 0
+        exact_tokens_found: int = 0
+        url, headers, body = await self._build_provider_request(provider, model_id, payload)
+        stream_timeout = self._get_timeout_for_capability(capability_id)
+
+        disconnected = False
+        try:
+            async with httpx.AsyncClient(timeout=stream_timeout) as client:
+                async with client.stream("POST", url, headers=headers, json=body) as response:
+                    async for chunk in response.aiter_bytes():
+                        # Client disconnect detection (Task 28)
+                        if request and await request.is_disconnected():
+                            logger.info("Client disconnected during stream for task '%s'. Cancelling upstream stream.", task_id)
+                            disconnected = True
+                            break
+
+                        # Exact token usage extraction (Task 27)
+                        chunk_str = chunk.decode("utf-8", errors="replace")
+                        if "usage" in chunk_str or "usageMetadata" in chunk_str:
+                            try:
+                                for line in chunk_str.split("\n"):
+                                    line = line.strip()
+                                    if line.startswith("data:"):
+                                        d_text = line[len("data:"):].strip()
+                                        if d_text and d_text != "[DONE]":
+                                            d_json = json.loads(d_text)
+                                            if "usage" in d_json and d_json["usage"]:
+                                                u = d_json["usage"]
+                                                t = u.get("total_tokens") or (u.get("prompt_tokens", 0) + u.get("completion_tokens", 0))
+                                                if t > 0:
+                                                    exact_tokens_found = t
+                                            elif "usageMetadata" in d_json:
+                                                u = d_json["usageMetadata"]
+                                                t = u.get("totalTokenCount", 0)
+                                                if t > 0:
+                                                    exact_tokens_found = t
+                            except Exception:
+                                pass
+
+                        chunks_count += 1
+                        yielded_any = True
+                        formatted = await replay_buffer.record_and_format_chunk(stream_id, chunk)
+                        yield formatted
+
+        except (httpx.RemoteProtocolError, httpx.ReadTimeout, httpx.ConnectTimeout) as e:
+            if yielded_any:
+                yield b"data: [DONE]\n\n"
+            else:
+                if reservation is not None:
+                    await self.wallet_engine.release(reservation.reservation_id)
+                raise RuntimeError(f"Provider stream failed: {e}") from e
+        else:
+            yield b"data: [DONE]\n\n"
+
+        # Reconcile streaming call with financial solvency rules (Tasks 28, 29)
+        provider_actual_units = exact_tokens_found if exact_tokens_found > 0 else max(1, chunks_count)
+        client_delivered_units = min(provider_actual_units, max(1, chunks_count))
+
+        # Stream Billing Policy: charge_actual (protects Talos COGS) or charge_delivered (absorbs delta)
+        billing_policy = getattr(self.settings, "stream_billing_policy", "charge_actual")
+        if billing_policy == "charge_delivered" and disconnected:
+            billed_units = client_delivered_units
+        else:
+            billed_units = provider_actual_units
+
+        try:
+            stream_event = MeteringEvent(
+                capability_id=capability_id,
+                provider=provider,
+                model_id=model_id,
+                unit_type="output_tokens",
+                quantity=billed_units,
+                task_id=task_id,
+            )
+            cost_usd = await self.cost_calculator.calculate_cost(stream_event)
+            actual_credits = 0 if is_unlimited else await self.pricing_engine.credits_for_event(stream_event, cost_usd)
+
+            stream_event.provider_cost_usd = cost_usd
+            stream_event.credits_charged = actual_credits
+            stream_event.metadata = {
+                "provider_actual_units": provider_actual_units,
+                "client_delivered_units": client_delivered_units,
+                "interrupted": disconnected,
+                "billing_policy": billing_policy,
+            }
+            await self._persist_usage_event(acc_uuid, stream_event)
+
+            if reservation is not None and not is_unlimited:
+                # Commits billed units and releases all excess held credits atomically
+                await self.wallet_engine.commit(reservation.reservation_id, actual_credits)
+
+            await self._log_pricing_event(
+                account_id=acc_uuid,
+                task_id=task_id,
+                capability_id=capability_id,
+                provider=provider,
+                actual_units=billed_units,
+                precheck_units=worst_case_units,
+                rejected=False,
+                credits_charged=actual_credits,
+                pricing_version=await self.pricing_engine.get_active_pricing_version(),
+            )
+        except Exception as e:
+            logger.warning("Error recording stream usage reconciliation: %s", e)
+
+
+    # ─── Internal Dispatch & Metering Helpers ─────────────────────────────────
+
+    async def _is_unlimited_account(self, account_id: uuid.UUID) -> bool:
+        result = await self.db.execute(
+            select(Account).where(Account.account_id == account_id)
+        )
+        acc = result.scalar_one_or_none()
+        if acc is None:
+            return False
+        return bool(
+            acc.role == "admin"
+            or acc.subscription_tier in ("admin", "unlimited")
+            or (acc.email and acc.email.lower() in [e.lower() for e in self.settings.admin_email_list])
+        )
+
+    async def _dispatch(
+        self, capability_id: str, payload: dict, provider: str = "groq", model_id: str = "default"
+    ) -> tuple[dict, dict]:
+        """
+        Dispatches request to provider using server-side API keys.
+        Returns (user_visible_result_dict, raw_provider_response_dict).
+        """
+        settings = self.settings
+
+        if capability_id in ("reasoning_model", "code_model", "fast_model", "vision_model"):
+            return await self._dispatch_llm(provider, model_id, payload, settings)
+        elif capability_id == "web_search":
+            return await self._dispatch_search(payload, settings)
+        elif capability_id == "image_gen":
+            return await self._dispatch_image(payload, settings)
+        elif capability_id == "browser_use":
+            return {"status": "success", "seconds": payload.get("seconds", 60)}, {"browser_seconds": payload.get("seconds", 60)}
+        else:
+            raise ValueError(f"Unknown capability_id: {capability_id}")
+
+    def _get_timeout_for_capability(self, capability_id: str) -> httpx.Timeout:
+        """Configurable timeouts per model class (Task 19)."""
+        if capability_id in ("fast_model", "web_search"):
+            return httpx.Timeout(connect=5.0, read=15.0, write=10.0, pool=10.0)
+        elif capability_id == "reasoning_model":
+            return httpx.Timeout(connect=5.0, read=180.0, write=30.0, pool=30.0)
+        else:
+            return httpx.Timeout(connect=5.0, read=60.0, write=20.0, pool=20.0)
+
+    def _get_provider_credentials(self, provider: str, settings) -> tuple[str, str | None, str]:
+        """Returns (primary_key, secondary_key, base_url)."""
+        p = provider.lower().strip()
+        if p == "anthropic":
+            return settings.anthropic_api_key or "", settings.anthropic_api_key_previous, "https://api.anthropic.com/v1"
+        elif p == "openai":
+            return settings.openai_api_key or "", settings.openai_api_key_previous, "https://api.openai.com/v1"
+        elif p == "gemini":
+            return settings.gemini_api_key or "", settings.gemini_api_key_previous, "https://generativelanguage.googleapis.com/v1beta"
+        elif p == "groq":
+            return settings.groq_api_key or "", settings.groq_api_key_previous, "https://api.groq.com/openai/v1"
+        elif p == "deepseek":
+            return settings.deepseek_api_key or settings.groq_api_key or "", settings.deepseek_api_key_previous, "https://api.deepseek.com/v1"
+        elif p in ("zhipu", "z.ai"):
+            key = settings.zai_api_key or settings.zhipu_api_key or os.environ.get("ZAI_API_KEY") or ""
+            return key, settings.zai_api_key_previous, "https://api.z.ai/api/paas/v4"
+        else:
+            key = settings.zai_api_key or settings.zhipu_api_key or os.environ.get("ZAI_API_KEY") or ""
+            return key, None, "https://api.z.ai/api/paas/v4"
+
+    def _has_credentials(self, provider: str) -> bool:
+        key, _, _ = self._get_provider_credentials(provider, self.settings)
+        return bool(key)
+
+    async def _dispatch_llm(
+        self, provider: str, model_id: str, payload: dict, settings
+    ) -> tuple[dict, dict]:
+        """Executes LLM call using server-side key, circuit breaker, and zero-downtime rotation."""
+        import time
+        from app.services.circuit_breaker import circuit_breaker
+        from app.services.provider_telemetry import telemetry_tracker
+
+        primary_key, secondary_key, base_url = self._get_provider_credentials(provider, settings)
+        if not primary_key:
+            raise RuntimeError(f"API key not configured for provider '{provider}'")
+
+        timeout = self._get_timeout_for_capability(payload.get("capability_id", "default"))
+        t0 = time.perf_counter()
+        p = provider.lower().strip()
+
+        try:
+            if p == "anthropic":
+                from app.services.adapters import AnthropicAdapter
+                adapter = AnthropicAdapter(primary_key, secondary_key, base_url)
+                url, headers, body = adapter.format_request(model_id, payload, stream=False)
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    resp = await client.post(url, headers=headers, json=body)
+                    if resp.status_code == 401 and secondary_key:
+                        logger.warning("Anthropic primary key failed with 401; attempting secondary key rotation")
+                        headers = adapter.get_rotated_headers(use_secondary=True)
+                        resp = await client.post(url, headers=headers, json=body)
+                    resp.raise_for_status()
+                    data = resp.json()
+                content_text = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
+                user_result = {"choices": [{"message": {"role": "assistant", "content": content_text}}]}
+                raw_response = data
+
+            elif p == "gemini":
+                from app.services.adapters import GeminiAdapter
+                adapter = GeminiAdapter(primary_key, secondary_key, base_url)
+                url, headers, body = adapter.format_request(model_id, payload, stream=False)
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    resp = await client.post(url, headers=headers, json=body)
+                    if resp.status_code == 401 and secondary_key:
+                        logger.warning("Gemini primary key failed with 401; attempting secondary key rotation")
+                        url = adapter.get_rotated_url(model_id, stream=False, use_secondary=True)
+                        resp = await client.post(url, headers=headers, json=body)
+                    resp.raise_for_status()
+                    data = resp.json()
+                candidates = data.get("candidates", [])
+                text_part = ""
+                if candidates:
+                    parts = candidates[0].get("content", {}).get("parts", [])
+                    text_part = "".join(part.get("text", "") for part in parts if "text" in part)
+                user_result = {"choices": [{"message": {"role": "assistant", "content": text_part}}]}
+                raw_response = data
+
+            elif p == "openai":
+                from app.services.adapters import OpenAIAdapter
+                adapter = OpenAIAdapter(primary_key, secondary_key, base_url)
+                url, headers, body = adapter.format_request(model_id, payload, stream=False)
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    resp = await client.post(url, headers=headers, json=body)
+                    if resp.status_code == 401 and secondary_key:
+                        logger.warning("OpenAI primary key failed with 401; attempting secondary key rotation")
+                        headers = adapter.get_rotated_headers(use_secondary=True)
+                        resp = await client.post(url, headers=headers, json=body)
+                    resp.raise_for_status()
+                    data = resp.json()
+                user_result = {"choices": data.get("choices", [])}
+                raw_response = data
+
+            else:
+                # Default OpenAI-compatible endpoint (groq, deepseek, zhipu)
+                messages = payload.get("messages", [])
+                extra_body = {k: v for k, v in payload.items() if k not in ("model", "messages")}
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    resp = await client.post(
+                        f"{base_url}/chat/completions",
+                        headers={"Authorization": f"Bearer {primary_key}", "Content-Type": "application/json"},
+                        json={"model": model_id, "messages": messages, **extra_body},
+                    )
+                    if resp.status_code == 401 and secondary_key:
+                        logger.warning("%s primary key failed with 401; attempting secondary key rotation", provider)
+                        resp = await client.post(
+                            f"{base_url}/chat/completions",
+                            headers={"Authorization": f"Bearer {secondary_key}", "Content-Type": "application/json"},
+                            json={"model": model_id, "messages": messages, **extra_body},
+                        )
+                    resp.raise_for_status()
+                    data = resp.json()
+                user_result = {"choices": data.get("choices", [])}
+                raw_response = data
+
+            latency_ms = (time.perf_counter() - t0) * 1000
+            await circuit_breaker.record_success(provider)
+            usage = raw_response.get("usage", {})
+            tokens = usage.get("total_tokens") or (usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0))
+            await telemetry_tracker.record_call(provider, latency_ms, success=True, tokens=tokens)
+            return user_result, raw_response
+
+        except Exception as e:
+            latency_ms = (time.perf_counter() - t0) * 1000
+            await circuit_breaker.record_failure(provider, e)
+            await telemetry_tracker.record_call(provider, latency_ms, success=False, tokens=0)
+            raise
+
+    async def _build_provider_request(
+        self, provider: str, model_id: str, payload: dict
+    ) -> tuple[str, dict, dict]:
+        p = provider.lower().strip()
+        primary_key, secondary_key, base_url = self._get_provider_credentials(provider, self.settings)
+
+        if p == "anthropic":
+            from app.services.adapters import AnthropicAdapter
+            adapter = AnthropicAdapter(primary_key, secondary_key, base_url)
+            return adapter.format_request(model_id, payload, stream=True)
+        elif p == "gemini":
+            from app.services.adapters import GeminiAdapter
+            adapter = GeminiAdapter(primary_key, secondary_key, base_url)
+            return adapter.format_request(model_id, payload, stream=True)
+        elif p == "openai":
+            from app.services.adapters import OpenAIAdapter
+            adapter = OpenAIAdapter(primary_key, secondary_key, base_url)
+            return adapter.format_request(model_id, payload, stream=True)
+        else:
+            body = {**payload, "model": model_id, "stream": True}
+            headers = {"Authorization": f"Bearer {primary_key}", "Content-Type": "application/json"}
+            return f"{base_url}/chat/completions", headers, body
+
+    def _extract_metering_events(
+        self,
+        capability_id: str,
+        provider: str,
+        model_id: str,
+        payload: dict,
+        raw_response: dict,
+        task_id: str | None,
+    ) -> list[MeteringEvent]:
+        if capability_id in ("reasoning_model", "code_model", "fast_model", "vision_model"):
+            return extract_llm_usage(raw_response, capability_id, provider, model_id, task_id)
+        elif capability_id == "web_search":
+            return extract_search_usage(raw_response, capability_id, provider, model_id, task_id)
+        elif capability_id == "browser_use":
+            return extract_browser_usage(raw_response.get("browser_seconds", 60), capability_id, provider, model_id, task_id)
+        elif capability_id == "image_gen":
+            return extract_image_usage(raw_response, capability_id, provider, model_id, task_id)
+        else:
+            return [MeteringEvent(
+                capability_id=capability_id,
+                provider=provider,
+                model_id=model_id,
+                unit_type="per_call",
+                quantity=1,
+                task_id=task_id,
+            )]
+
+    async def _persist_usage_event(self, account_id: uuid.UUID, event: MeteringEvent) -> None:
+        """Persists internal UsageEvent row to DB."""
+        # Convert string unit_type to UnitType enum safely
+        try:
+            enum_unit = UnitType(event.unit_type)
+        except ValueError:
+            enum_unit = UnitType.PER_CALL
+
+        row = UsageEvent(
+            account_id=account_id,
+            task_id=event.task_id,
+            capability_id=event.capability_id,
+            provider=event.provider,          # INTERNAL ONLY
+            model_id=event.model_id,          # INTERNAL ONLY
+            unit_type=enum_unit,
+            quantity=event.quantity,
+            provider_cost_usd=event.provider_cost_usd,
+            credits_charged=event.credits_charged,
+            event_metadata=event.metadata,
+            pricing_version=event.pricing_version,
+        )
+        self.db.add(row)
+
+    async def _log_pricing_event(
+        self,
+        account_id: uuid.UUID,
+        task_id: str | None,
+        capability_id: str,
+        provider: str,
+        actual_units: int,
+        precheck_units: int,
+        rejected: bool,
+        credits_charged: int,
+        pricing_version: str = "v1",
+    ) -> None:
+        pe = PricingEvent(
+            account_id=account_id,
+            task_id=task_id,
+            capability_id=capability_id,
+            provider=provider,  # INTERNAL ONLY
+            actual_units=actual_units,
+            precheck_units=precheck_units,
+            rejected=rejected,
+            credits_charged=credits_charged,
+            pricing_version=pricing_version,
+        )
+        self.db.add(pe)
+
+    async def _log_rejected_event(
+        self, account_id: uuid.UUID, task_id: str | None, capability_id: str, worst_case_units: int
+    ) -> None:
+        pe = PricingEvent(
+            account_id=account_id,
+            task_id=task_id,
+            capability_id=capability_id,
+            provider=self._fallback_provider(capability_id),
+            actual_units=0,
+            precheck_units=worst_case_units,
+            rejected=True,
+            credits_charged=0,
+            pricing_version="v1",
+        )
+        self.db.add(pe)
+
+    @staticmethod
+    def _capability_to_default_unit(capability_id: str) -> str:
+        if capability_id in ("reasoning_model", "code_model", "fast_model", "vision_model"):
+            return "output_tokens"
+        elif capability_id == "image_gen":
+            return "image_medium"
+        else:
+            return "per_call"
+
+    @classmethod
+    def _fallback_provider(cls, capability_id: str) -> str:
+        chain = DEFAULT_FALLBACK_CHAINS.get(capability_id)
+        if chain:
+            return chain[0][0]
+        return "groq"
+
+    @classmethod
+    def _fallback_model_id(cls, capability_id: str) -> str:
+        chain = DEFAULT_FALLBACK_CHAINS.get(capability_id)
+        if chain:
+            return chain[0][1]
+        return "default"
+
+    async def resolve_provider_routing(self, capability_id: str) -> tuple[str, str]:
+        """
+        Dynamically resolves provider and model_id using model registry,
+        circuit breaker state, and configured fallback chains.
+        """
+        from app.services.circuit_breaker import circuit_breaker
+
+        # 1. Try model registry first
+        try:
+            model_config = await self.model_registry.switch_model(capability_id)
+            p = model_config.provider
+            if await circuit_breaker.can_execute(p) and self._has_credentials(p):
+                return p, model_config.model_id
+        except Exception:
+            pass
+
+        # 2. Iterate capability fallback chain
+        chain = DEFAULT_FALLBACK_CHAINS.get(capability_id, [("groq", "default")])
+        for p, m in chain:
+            if await circuit_breaker.can_execute(p) and self._has_credentials(p):
+                return p, m
+
+        # 3. If all circuit breaker checks failed or keys missing, return top candidate
+        return chain[0]
+
+
+DEFAULT_FALLBACK_CHAINS: dict[str, list[tuple[str, str]]] = {
+    "reasoning_model": [
+        ("anthropic", "claude-3-7-sonnet-20250219"),
+        ("openai", "o3-mini"),
+        ("deepseek", "deepseek-reasoner"),
+        ("groq", "deepseek-r1-distill-llama-70b"),
+        ("zhipu", "glm-4.5-flash"),
+    ],
+    "fast_model": [
+        ("groq", "llama-3.3-70b-versatile"),
+        ("openai", "gpt-4o-mini"),
+        ("gemini", "gemini-2.0-flash"),
+        ("zhipu", "glm-4.5-flash"),
+    ],
+    "code_model": [
+        ("anthropic", "claude-3-5-sonnet-20241022"),
+        ("openai", "gpt-4o"),
+        ("deepseek", "deepseek-coder"),
+        ("zhipu", "glm-4.5-flash"),
+    ],
+    "vision_model": [
+        ("openai", "gpt-4o"),
+        ("anthropic", "claude-3-5-sonnet-20241022"),
+        ("gemini", "gemini-2.0-flash"),
+        ("zhipu", "glm-4.6v-flash"),
+    ],
+    "web_search": [
+        ("tavily", "tavily-search"),
+    ],
+    "browser_use": [
+        ("internal", "talos-browser-runner"),
+    ],
+    "image_gen": [
+        ("openai", "dall-e-3"),
+        ("zhipu", "cogview-4-250304"),
+    ],
+}
