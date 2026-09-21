@@ -362,13 +362,20 @@ async def google_callback(
 
     user_agent = request.headers.get("user-agent")
     ip_address = request.client.host if request.client else None
-    session_token, refresh_token, session_rec = await identity_service.create_web_session_record(
-        db=db,
-        account=account,
-        user_agent=user_agent,
-        ip_address=ip_address,
-    )
-    await db.commit()
+    try:
+        session_token, refresh_token, session_rec = await identity_service.create_web_session_record(
+            db=db,
+            account=account,
+            user_agent=user_agent,
+            ip_address=ip_address,
+        )
+        await db.commit()
+    except Exception as exc:
+        logger.error("Failed to create web session for account %s: %s", getattr(account, 'account_id', 'unknown'), exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create session: {exc}",
+        )
 
     if "application/json" in (request.headers.get("accept") or ""):
         return {
