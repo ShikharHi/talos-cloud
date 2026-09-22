@@ -72,6 +72,12 @@ def get_signing_key() -> tuple[str, str]:
     if "private_key_pem" in _ephemeral_key_cache:
         return _ephemeral_key_cache["private_key_pem"], _ephemeral_key_cache["key_id"]
 
+    if settings.talos_env == "production":
+        raise RuntimeError(
+            "Production environment requires explicit JWT_PRIVATE_KEY_PEM. "
+            "Set a stable RS256 private key in Render before issuing web sessions."
+        )
+
     logger.warning("No explicit JWT_PRIVATE_KEY_PEM provided. Generating ephemeral RSA-2048 keypair.")
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     priv_pem = private_key.private_bytes(

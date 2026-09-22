@@ -374,7 +374,7 @@ class RelayService:
         )
 
     async def _dispatch(
-        self, capability_id: str, payload: dict, provider: str = "groq", model_id: str = "default"
+        self, capability_id: str, payload: dict, provider: str = "zhipu", model_id: str = "glm-4.5-flash"
     ) -> tuple[dict, dict]:
         """
         Dispatches request to provider using server-side API keys.
@@ -657,7 +657,7 @@ class RelayService:
         chain = DEFAULT_FALLBACK_CHAINS.get(capability_id)
         if chain:
             return chain[0][0]
-        return "groq"
+        return "zhipu"
 
     @classmethod
     def _fallback_model_id(cls, capability_id: str) -> str:
@@ -683,7 +683,7 @@ class RelayService:
             pass
 
         # 2. Iterate capability fallback chain
-        chain = DEFAULT_FALLBACK_CHAINS.get(capability_id, [("groq", "default")])
+        chain = DEFAULT_FALLBACK_CHAINS.get(capability_id, [("zhipu", "glm-4.5-flash")])
         for p, m in chain:
             if await circuit_breaker.can_execute(p) and self._has_credentials(p):
                 return p, m
@@ -694,17 +694,15 @@ class RelayService:
 
 DEFAULT_FALLBACK_CHAINS: dict[str, list[tuple[str, str]]] = {
     "reasoning_model": [
+        ("zhipu", "glm-4.5-flash"),
         ("anthropic", "claude-3-7-sonnet-20250219"),
         ("openai", "o3-mini"),
         ("deepseek", "deepseek-reasoner"),
-        ("groq", "openai/gpt-oss-120b"),
-        ("zhipu", "glm-4.5-flash"),
     ],
     "fast_model": [
-        ("groq", "openai/gpt-oss-20b"),
+        ("zhipu", "glm-4.5-flash"),
         ("openai", "gpt-4o-mini"),
         ("gemini", "gemini-2.0-flash"),
-        ("zhipu", "glm-4.5-flash"),
     ],
     "code_model": [
         ("anthropic", "claude-3-5-sonnet-20241022"),

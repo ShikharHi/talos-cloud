@@ -37,8 +37,9 @@ logger = logging.getLogger("talos.inngest.tasks")
 )
 async def tasks_aggregate_usage_fn(
     ctx: inngest.Context,
-    step: inngest.Step,
+    step: inngest.Step | None = None,
 ) -> dict[str, Any]:
+    step = step or ctx.step
     task_id = ctx.event.data.get("task_id")
     if not task_id:
         raise inngest.NonRetriableError("Missing task_id in event data")
@@ -60,3 +61,4 @@ async def tasks_aggregate_usage_fn(
 
     result = await step.run("finalize-task-usage", _aggregate)
     return result
+

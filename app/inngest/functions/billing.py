@@ -45,8 +45,9 @@ logger = logging.getLogger("talos.inngest.billing")
 )
 async def billing_reconcile_subscriptions_fn(
     ctx: inngest.Context,
-    step: inngest.Step,
+    step: inngest.Step | None = None,
 ) -> dict[str, Any]:
+    step = step or ctx.step
     """
     Scheduled every 15 minutes to match existing Talos Cloud subscription reset cycle.
     Idempotently grants monthly allowances for due subscriptions.
@@ -100,8 +101,9 @@ async def billing_reconcile_subscriptions_fn(
 )
 async def billing_process_webhook_fn(
     ctx: inngest.Context,
-    step: inngest.Step,
+    step: inngest.Step | None = None,
 ) -> dict[str, Any]:
+    step = step or ctx.step
     """
     Processes asynchronous normalized billing events (e.g. from Razorpay/Stripe webhooks)
     with strict per-account serialization and DB-level UNIQUE deduplication.
@@ -133,3 +135,4 @@ async def billing_process_webhook_fn(
 
     result = await step.run("handle-billing-event", _handle)
     return result
+

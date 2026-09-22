@@ -36,8 +36,9 @@ logger = logging.getLogger("talos.inngest.monitoring")
 )
 async def monitoring_margin_check_fn(
     ctx: inngest.Context,
-    step: inngest.Step,
+    step: inngest.Step | None = None,
 ) -> dict[str, Any]:
+    step = step or ctx.step
     """
     Runs daily margin snapshot calculation at 02:00 UTC.
     """
@@ -57,3 +58,4 @@ async def monitoring_margin_check_fn(
     result = await step.run("run-margin-check", _execute_margin_check)
     logger.info("Monitoring Inngest: Margin check completed")
     return result
+

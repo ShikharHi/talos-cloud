@@ -41,8 +41,9 @@ logger = logging.getLogger("talos.inngest.maintenance")
 )
 async def maintenance_cleanup_stale_reservations_fn(
     ctx: inngest.Context,
-    step: inngest.Step,
+    step: inngest.Step | None = None,
 ) -> dict[str, Any]:
+    step = step or ctx.step
     """
     Scheduled every 5 minutes to match existing Talos reservation recovery timing.
     """
@@ -72,8 +73,9 @@ async def maintenance_cleanup_stale_reservations_fn(
 )
 async def maintenance_cleanup_staging_uploads_fn(
     ctx: inngest.Context,
-    step: inngest.Step,
+    step: inngest.Step | None = None,
 ) -> dict[str, Any]:
+    step = step or ctx.step
     """
     Scheduled every 30 minutes to clean up expired staging package uploads in Tigris.
     """
@@ -87,3 +89,4 @@ async def maintenance_cleanup_staging_uploads_fn(
     result = await step.run("cleanup-staging-uploads", _execute_storage_cleanup)
     logger.info("Maintenance Inngest: Storage cleanup completed: %s", result.get("stats"))
     return result
+

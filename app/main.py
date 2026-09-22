@@ -300,6 +300,11 @@ async def health():
     return {"status": "ok", "service": "talos-cloud", "version": "3.0.0"}
 
 
+@app.get("/")
+async def root():
+    return {"status": "ok", "service": "talos-cloud", "health": "/health", "ready": "/ready"}
+
+
 @app.get("/health/db")
 async def health_db():
     result = await check_db_health()
@@ -344,4 +349,3 @@ async def connection_callback_relay(provider: str, request: Request):
     if query:
         target_url += f"?{query}"
     return RedirectResponse(url=target_url)
-

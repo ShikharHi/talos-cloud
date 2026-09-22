@@ -34,8 +34,9 @@ logger = logging.getLogger("talos.inngest.auth")
 )
 async def auth_send_verification_email_fn(
     ctx: inngest.Context,
-    step: inngest.Step,
+    step: inngest.Step | None = None,
 ) -> dict[str, Any]:
+    step = step or ctx.step
     data = ctx.event.data
     email = data.get("email")
     token = data.get("token")
@@ -72,8 +73,9 @@ async def auth_send_verification_email_fn(
 )
 async def auth_send_password_reset_email_fn(
     ctx: inngest.Context,
-    step: inngest.Step,
+    step: inngest.Step | None = None,
 ) -> dict[str, Any]:
+    step = step or ctx.step
     data = ctx.event.data
     email = data.get("email")
     token = data.get("token")
@@ -109,8 +111,9 @@ async def auth_send_password_reset_email_fn(
 )
 async def auth_send_security_alert_fn(
     ctx: inngest.Context,
-    step: inngest.Step,
+    step: inngest.Step | None = None,
 ) -> dict[str, Any]:
+    step = step or ctx.step
     data = ctx.event.data
     email = data.get("email")
     subject = data.get("subject", "Talos Security Alert")
@@ -151,8 +154,9 @@ async def auth_send_security_alert_fn(
 )
 async def auth_cleanup_expired_tokens_fn(
     ctx: inngest.Context,
-    step: inngest.Step,
+    step: inngest.Step | None = None,
 ) -> dict[str, Any]:
+    step = step or ctx.step
     """
     Scheduled hourly to clean up expired device tokens and web sessions.
     Uses the cloud's own PostgreSQL via SQLAlchemy — no talos-backend dependency.
@@ -197,3 +201,4 @@ async def auth_cleanup_expired_tokens_fn(
     result = await step.run("cleanup-tokens", _purge)
     logger.info("Auth Inngest: Cleanup completed: %s", result)
     return result
+

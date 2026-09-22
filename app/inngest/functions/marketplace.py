@@ -51,8 +51,9 @@ logger = logging.getLogger("talos.inngest.marketplace")
 )
 async def marketplace_verify_and_promote_fn(
     ctx: inngest.Context,
-    step: inngest.Step,
+    step: inngest.Step | None = None,
 ) -> dict[str, Any]:
+    step = step or ctx.step
     upload_id_str = ctx.event.data.get("upload_id")
     if not upload_id_str:
         raise inngest.NonRetriableError("Missing upload_id in event data")
@@ -252,3 +253,4 @@ async def marketplace_verify_and_promote_fn(
         "upload_id": upload_id_str,
         "canonical_key": canonical_key,
     }
+
