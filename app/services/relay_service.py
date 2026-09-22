@@ -393,6 +393,63 @@ class RelayService:
         else:
             raise ValueError(f"Unknown capability_id: {capability_id}")
 
+    async def _dispatch_image(self, payload: dict, settings) -> tuple[dict, dict]:
+        """Dispatch an image-generation request through the configured provider."""
+        provider = payload.get("provider", "openai").lower().strip()
+        api_key, _, base_url = self._get_provider_credentials(provider, settings)
+        if not api_key:
+            raise RuntimeError(f"API key not configured for provider '{provider}'")
+
+        body = {
+            "model": payload.get("model", "dall-e-3"),
+            "prompt": payload.get("prompt", ""),
+            "n": payload.get("n", 1),
+            "size": payload.get("size", "1024x1024"),
+        }
+        for key in ("quality", "style", "response_format"):
+            if key in payload:
+                body[key] = payload[key]
+
+        timeout = self._get_timeout_for_capability("image_gen")
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                f"{base_url}/images/generations",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json=body,
+            )
+            response.raise_for_status()
+            data = response.json()
+
+        return {"data": data.get("data", [])}, data
+
+    async def _dispatch_search(self, payload: dict, settings) -> tuple[dict, dict]:
+        """Dispatch a web-search request through Tavily."""
+        api_key = self._normalize_key(getattr(settings, "tavily_api_key", None))
+        if not api_key:
+            raise RuntimeError("API key not configured for provider 'tavily'")
+
+        body = {
+            "query": payload.get("query", payload.get("q", "")),
+            "search_depth": payload.get("search_depth", "basic"),
+            "max_results": payload.get("max_results", 5),
+            "include_answer": payload.get("include_answer", False),
+        }
+        for key in ("include_raw_content", "include_images", "topic", "time_range"):
+            if key in payload:
+                body[key] = payload[key]
+
+        timeout = self._get_timeout_for_capability("web_search")
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                "https://api.tavily.com/search",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json=body,
+            )
+            response.raise_for_status()
+            data = response.json()
+
+        return {"results": data.get("results", []), "answer": data.get("answer")}, data
+
     def _get_timeout_for_capability(self, capability_id: str) -> httpx.Timeout:
         """Configurable timeouts per model class (Task 19)."""
         if capability_id in ("fast_model", "web_search"):
@@ -402,24 +459,29 @@ class RelayService:
         else:
             return httpx.Timeout(connect=5.0, read=60.0, write=20.0, pool=20.0)
 
+    @staticmethod
+    def _normalize_key(value: str | None) -> str:
+        return (value or "").strip()
+
     def _get_provider_credentials(self, provider: str, settings) -> tuple[str, str | None, str]:
         """Returns (primary_key, secondary_key, base_url)."""
         p = provider.lower().strip()
         if p == "anthropic":
-            return settings.anthropic_api_key or "", settings.anthropic_api_key_previous, "https://api.anthropic.com/v1"
+            return self._normalize_key(settings.anthropic_api_key), self._normalize_key(settings.anthropic_api_key_previous) or None, "https://api.anthropic.com/v1"
         elif p == "openai":
-            return settings.openai_api_key or "", settings.openai_api_key_previous, "https://api.openai.com/v1"
+            return self._normalize_key(settings.openai_api_key), self._normalize_key(settings.openai_api_key_previous) or None, "https://api.openai.com/v1"
         elif p == "gemini":
-            return settings.gemini_api_key or "", settings.gemini_api_key_previous, "https://generativelanguage.googleapis.com/v1beta"
+            return self._normalize_key(settings.gemini_api_key), self._normalize_key(settings.gemini_api_key_previous) or None, "https://generativelanguage.googleapis.com/v1beta"
         elif p == "groq":
-            return settings.groq_api_key or "", settings.groq_api_key_previous, "https://api.groq.com/openai/v1"
+            return self._normalize_key(settings.groq_api_key), self._normalize_key(settings.groq_api_key_previous) or None, "https://api.groq.com/openai/v1"
         elif p == "deepseek":
-            return settings.deepseek_api_key or settings.groq_api_key or "", settings.deepseek_api_key_previous, "https://api.deepseek.com/v1"
+            key = self._normalize_key(settings.deepseek_api_key) or self._normalize_key(settings.groq_api_key)
+            return key, self._normalize_key(settings.deepseek_api_key_previous) or None, "https://api.deepseek.com/v1"
         elif p in ("zhipu", "z.ai"):
-            key = settings.zai_api_key or settings.zhipu_api_key or os.environ.get("ZAI_API_KEY") or ""
-            return key, settings.zai_api_key_previous, "https://api.z.ai/api/paas/v4"
+            key = self._normalize_key(settings.zai_api_key) or self._normalize_key(settings.zhipu_api_key) or self._normalize_key(os.environ.get("ZAI_API_KEY"))
+            return key, self._normalize_key(settings.zai_api_key_previous) or None, "https://api.z.ai/api/paas/v4"
         else:
-            key = settings.zai_api_key or settings.zhipu_api_key or os.environ.get("ZAI_API_KEY") or ""
+            key = self._normalize_key(settings.zai_api_key) or self._normalize_key(settings.zhipu_api_key) or self._normalize_key(os.environ.get("ZAI_API_KEY"))
             return key, None, "https://api.z.ai/api/paas/v4"
 
     def _has_credentials(self, provider: str) -> bool:
@@ -435,6 +497,8 @@ class RelayService:
         from app.services.provider_telemetry import telemetry_tracker
 
         primary_key, secondary_key, base_url = self._get_provider_credentials(provider, settings)
+        primary_key = self._normalize_key(primary_key)
+        secondary_key = self._normalize_key(secondary_key) if secondary_key else None
         if not primary_key:
             raise RuntimeError(f"API key not configured for provider '{provider}'")
 
@@ -534,6 +598,10 @@ class RelayService:
     ) -> tuple[str, dict, dict]:
         p = provider.lower().strip()
         primary_key, secondary_key, base_url = self._get_provider_credentials(provider, self.settings)
+        primary_key = self._normalize_key(primary_key)
+        secondary_key = self._normalize_key(secondary_key) if secondary_key else None
+        if not primary_key:
+            raise RuntimeError(f"API key not configured for provider '{provider}'")
 
         if p == "anthropic":
             from app.services.adapters import AnthropicAdapter
