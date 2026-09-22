@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import DeclarativeBase
 
 
@@ -58,12 +59,25 @@ except Exception:
 _engine: AsyncEngine | None = None
 
 
+def _normalize_database_url(database_url: str) -> str:
+    """Translate hosted Postgres URL options into asyncpg-compatible settings."""
+    url = make_url(database_url)
+    if url.drivername != "postgresql+asyncpg":
+        return database_url
+
+    query = dict(url.query)
+    query.pop("channel_binding", None)
+    query.pop("sslmode", None)
+    return url.set(query=query).render_as_string(hide_password=False)
+
+
 def get_engine() -> AsyncEngine:
     global _engine
     if _engine is None:
         from app.config import get_settings
         settings = get_settings()
-        url = settings.database_url
+        url = _normalize_database_url(settings.database_url)
+        database_url = make_url(settings.database_url)
         import os
         kwargs: dict = {
             "pool_pre_ping": True,
@@ -83,6 +97,9 @@ def get_engine() -> AsyncEngine:
                     "command_timeout": 60,
                     "server_settings": {"application_name": "talos_cloud"},
                 }
+                sslmode = database_url.query.get("sslmode")
+                if sslmode in {"require", "verify-ca", "verify-full"}:
+                    kwargs["connect_args"]["ssl"] = True
         elif url.startswith("sqlite"):
             from sqlalchemy.pool import StaticPool
             kwargs["poolclass"] = StaticPool
