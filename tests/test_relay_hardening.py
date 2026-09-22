@@ -20,6 +20,8 @@ Covers:
 import asyncio
 import json
 import uuid
+from types import SimpleNamespace
+
 import pytest
 import pytest_asyncio
 from fastapi import HTTPException
@@ -36,6 +38,39 @@ from app.services.provider_telemetry import ProviderTelemetryTracker
 from app.services.stream_buffer import StreamReplayBuffer
 from app.services.adapters import OpenAIAdapter, AnthropicAdapter, GeminiAdapter
 from app.services.metering.llm_adapter import extract_llm_usage
+
+
+@pytest.mark.asyncio
+async def test_relay_rejects_blank_provider_api_key():
+    """Blank provider keys must never produce invalid `Authorization: Bearer ` headers."""
+    from app.services.relay_service import RelayService
+
+    service = RelayService(None)
+    service.settings = SimpleNamespace(
+        anthropic_api_key="",
+        anthropic_api_key_previous=None,
+        openai_api_key="",
+        openai_api_key_previous=None,
+        gemini_api_key="",
+        gemini_api_key_previous=None,
+        groq_api_key="",
+        groq_api_key_previous=None,
+        deepseek_api_key="",
+        deepseek_api_key_previous=None,
+        zai_api_key="",
+        zai_api_key_previous=None,
+        zhipu_api_key="",
+        zhipu_api_key_previous=None,
+        admin_email_list=[],
+    )
+
+    with pytest.raises(RuntimeError, match="API key not configured for provider 'zhipu'"):
+        await service._dispatch_llm(
+            "zhipu",
+            "glm-4.5-flash",
+            {"messages": [{"role": "user", "content": "hello"}]},
+            service.settings,
+        )
 
 
 # ─── Task 18: Gateway Concurrency Limiting ────────────────────────────────────
