@@ -13,6 +13,7 @@ INVARIANT:
 
 import os
 import uuid
+import logging
 from typing import Optional
 from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Query, Request, Response, status
 from fastapi.responses import RedirectResponse
@@ -28,6 +29,7 @@ from app.services.rate_limiter import rate_limiter
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 router_devices = APIRouter(prefix="/api/v1/devices", tags=["devices-v1"])
+logger = logging.getLogger(__name__)
 
 
 # ─── Auth Dependencies ────────────────────────────────────────────────────────

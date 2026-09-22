@@ -697,11 +697,11 @@ DEFAULT_FALLBACK_CHAINS: dict[str, list[tuple[str, str]]] = {
         ("anthropic", "claude-3-7-sonnet-20250219"),
         ("openai", "o3-mini"),
         ("deepseek", "deepseek-reasoner"),
-        ("groq", "deepseek-r1-distill-llama-70b"),
+        ("groq", "openai/gpt-oss-120b"),
         ("zhipu", "glm-4.5-flash"),
     ],
     "fast_model": [
-        ("groq", "llama-3.3-70b-versatile"),
+        ("groq", "openai/gpt-oss-20b"),
         ("openai", "gpt-4o-mini"),
         ("gemini", "gemini-2.0-flash"),
         ("zhipu", "glm-4.5-flash"),
