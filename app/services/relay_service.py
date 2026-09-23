@@ -593,11 +593,11 @@ class RelayService:
     def _get_timeout_for_capability(self, capability_id: str) -> httpx.Timeout:
         """Configurable timeouts per model class (Task 19)."""
         if capability_id in ("fast_model", "web_search"):
-            return httpx.Timeout(connect=5.0, read=15.0, write=10.0, pool=10.0)
+            return httpx.Timeout(connect=15.0, read=90.0, write=30.0, pool=30.0)
         elif capability_id == "reasoning_model":
-            return httpx.Timeout(connect=5.0, read=180.0, write=30.0, pool=30.0)
+            return httpx.Timeout(connect=15.0, read=300.0, write=60.0, pool=60.0)
         else:
-            return httpx.Timeout(connect=5.0, read=60.0, write=20.0, pool=20.0)
+            return httpx.Timeout(connect=15.0, read=120.0, write=30.0, pool=30.0)
 
     @staticmethod
     def _normalize_key(value: str | None) -> str:
