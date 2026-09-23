@@ -118,30 +118,69 @@ class RelayService:
                 raise e
 
         # ── Step 2: Resolve Provider Routing & Dispatch ──────────────────────
+        candidates: list[tuple[str, str]] = []
         try:
-            provider, model_id = await self.resolve_provider_routing(capability_id)
+            p_primary, m_primary = await self.resolve_provider_routing(capability_id)
+            candidates.append((p_primary, m_primary))
         except Exception:
-            provider = self._fallback_provider(capability_id)
-            model_id = self._fallback_model_id(capability_id)
+            pass
 
-        try:
+        for p_fb, m_fb in DEFAULT_FALLBACK_CHAINS.get(capability_id, []):
+            if (p_fb, m_fb) not in candidates and self._has_credentials(p_fb):
+                candidates.append((p_fb, m_fb))
+
+        if not candidates:
+            candidates.append((self._fallback_provider(capability_id), self._fallback_model_id(capability_id)))
+
+        provider_result = None
+        raw_response = None
+        last_dispatch_err = None
+        provider = candidates[0][0]
+        model_id = candidates[0][1]
+
+        for cand_provider, cand_model in candidates:
             try:
-                provider_result, raw_response = await self._dispatch(
+                try:
+                    provider_result, raw_response = await self._dispatch(
+                        capability_id,
+                        payload,
+                        provider=cand_provider,
+                        model_id=cand_model,
+                    )
+                except TypeError:
+                    provider_result, raw_response = await self._dispatch(
+                        capability_id,
+                        payload,
+                    )
+                provider = cand_provider
+                model_id = cand_model
+                last_dispatch_err = None
+                break
+            except Exception as e:
+                last_dispatch_err = e
+                logger.warning(
+                    "Provider '%s' dispatch failed for capability '%s': %s. Trying fallback candidate if available...",
+                    cand_provider,
                     capability_id,
-                    payload,
-                    provider=provider,
-                    model_id=model_id,
+                    e,
                 )
-            except TypeError:
-                provider_result, raw_response = await self._dispatch(
-                    capability_id,
-                    payload,
-                )
-        except Exception as e:
-            # Dispatch failed — release reservation in full (charge 0 credits)
+                try:
+                    from app.services.circuit_breaker import circuit_breaker
+                    await circuit_breaker.record_failure(cand_provider, 429 if "429" in str(e) else 500)
+                except Exception:
+                    pass
+
+        if provider_result is None:
             if reservation is not None:
                 await self.wallet_engine.release(reservation.reservation_id)
-            raise RuntimeError(f"Provider call failed for capability '{capability_id}': {e}") from e
+            err_str = str(last_dispatch_err)
+            if "429" in err_str or "too many requests" in err_str.lower():
+                from fastapi import HTTPException
+                raise HTTPException(
+                    status_code=429,
+                    detail="The AI service is currently busy or rate-limited. Please retry in a moment.",
+                )
+            raise RuntimeError(f"Provider call failed for capability '{capability_id}': {last_dispatch_err}") from last_dispatch_err
 
         # ── Step 3: Metering & Credit Calculation ───────────────────────────
         metering_events = self._extract_metering_events(
@@ -248,11 +287,22 @@ class RelayService:
                 idempotency_key=idempotency_key,
             )
 
+        candidates: list[tuple[str, str]] = []
         try:
-            provider, model_id = await self.resolve_provider_routing(capability_id)
+            p_primary, m_primary = await self.resolve_provider_routing(capability_id)
+            candidates.append((p_primary, m_primary))
         except Exception:
-            provider = self._fallback_provider(capability_id)
-            model_id = self._fallback_model_id(capability_id)
+            pass
+
+        for p_fb, m_fb in DEFAULT_FALLBACK_CHAINS.get(capability_id, []):
+            if (p_fb, m_fb) not in candidates and self._has_credentials(p_fb):
+                candidates.append((p_fb, m_fb))
+
+        if not candidates:
+            candidates.append((self._fallback_provider(capability_id), self._fallback_model_id(capability_id)))
+
+        provider = candidates[0][0]
+        model_id = candidates[0][1]
 
         stream_id = task_id or str(uuid.uuid4())
         sm = StreamStateMachine(stream_id)
@@ -266,70 +316,85 @@ class RelayService:
         replay_buffer.record_event_background(stream_id, start_bytes, seq)
         yield start_bytes
 
-        url, headers, body = await self._build_provider_request(provider, model_id, payload)
         stream_timeout = self._get_timeout_for_capability(capability_id)
-
         disconnected = False
         t_req_start = time.perf_counter()
         first_delta_sent = False
 
+        response = None
+        active_client = None
+        last_resp_code = 500
+
+        for cand_provider, cand_model in candidates:
+            provider = cand_provider
+            model_id = cand_model
+            adapter = ProviderStreamAdapter(provider, sm)
+            try:
+                url, headers, body = await self._build_provider_request(provider, model_id, payload)
+                client = httpx.AsyncClient(timeout=stream_timeout)
+                resp = await client.send(client.build_request("POST", url, headers=headers, json=body), stream=True)
+                if resp.status_code == 200:
+                    response = resp
+                    active_client = client
+                    break
+                else:
+                    last_resp_code = resp.status_code
+                    await resp.aread()
+                    await resp.aclose()
+                    await client.aclose()
+                    logger.warning("Provider '%s' returned HTTP %s for stream. Trying fallback candidate...", provider, resp.status_code)
+            except Exception as e:
+                logger.warning("Provider '%s' connection failed for stream: %s. Trying fallback candidate...", provider, e)
+
         try:
-            async with httpx.AsyncClient(timeout=stream_timeout) as client:
-                async with client.stream("POST", url, headers=headers, json=body) as response:
-                    if response.status_code != 200:
-                        err_text = await response.aread()
-                        err_msg = err_text.decode("utf-8", errors="replace")
-                        logger.warning("Upstream provider %s returned HTTP %s: %s", provider, response.status_code, err_msg)
-                        if response.status_code == 429:
-                            clean_msg = "The model service is temporarily busy. Please try again in a moment."
-                            err_code = "rate_limit_exceeded"
-                        elif response.status_code >= 500:
-                            clean_msg = "Upstream model service encountered a temporary error. Please try again."
-                            err_code = "upstream_service_error"
-                        else:
-                            clean_msg = "Model generation failed. Please try again."
-                            err_code = "upstream_error"
+            if response is None:
+                if last_resp_code == 429:
+                    clean_msg = "The model service is temporarily busy. Please try again in a moment."
+                    err_code = "rate_limit_exceeded"
+                else:
+                    clean_msg = "Model generation failed. Please try again."
+                    err_code = "upstream_error"
 
-                        fail_evt = sm.transition_failed(clean_msg, code=err_code)
-                        if fail_evt:
+                fail_evt = sm.transition_failed(clean_msg, code=err_code)
+                if fail_evt:
+                    seq += 1
+                    fail_bytes = fail_evt.to_sse_bytes(event_id=seq)
+                    replay_buffer.record_event_background(stream_id, fail_bytes, seq)
+                    yield fail_bytes
+            else:
+                async for raw_chunk in response.aiter_bytes():
+                    # Client disconnect detection
+                    if request and await request.is_disconnected():
+                        logger.info("Client disconnected during stream for task '%s'. Cancelling upstream stream.", task_id)
+                        disconnected = True
+                        canc_evt = sm.transition_cancelled()
+                        if canc_evt:
                             seq += 1
-                            fail_bytes = fail_evt.to_sse_bytes(event_id=seq)
-                            replay_buffer.record_event_background(stream_id, fail_bytes, seq)
-                            yield fail_bytes
-                    else:
-                        async for raw_chunk in response.aiter_bytes():
-                            # Client disconnect detection
-                            if request and await request.is_disconnected():
-                                logger.info("Client disconnected during stream for task '%s'. Cancelling upstream stream.", task_id)
-                                disconnected = True
-                                canc_evt = sm.transition_cancelled()
-                                if canc_evt:
-                                    seq += 1
-                                    canc_bytes = canc_evt.to_sse_bytes(event_id=seq)
-                                    replay_buffer.record_event_background(stream_id, canc_bytes, seq)
-                                    yield canc_bytes
-                                break
+                            canc_bytes = canc_evt.to_sse_bytes(event_id=seq)
+                            replay_buffer.record_event_background(stream_id, canc_bytes, seq)
+                            yield canc_bytes
+                        break
 
-                            # Feed raw bytes incrementally to reconstruct complete SSE messages
-                            for sse_msg in parser.feed(raw_chunk):
-                                for talos_evt in adapter.process_message(sse_msg):
-                                    if not first_delta_sent and talos_evt.type == "stream.delta":
-                                        first_delta_sent = True
-                                        ttft_ms = (time.perf_counter() - t_req_start) * 1000
-                                        talos_evt.metadata["ttft_ms"] = round(ttft_ms, 2)
+                    # Feed raw bytes incrementally to reconstruct complete SSE messages
+                    for sse_msg in parser.feed(raw_chunk):
+                        for talos_evt in adapter.process_message(sse_msg):
+                            if not first_delta_sent and talos_evt.type == "stream.delta":
+                                first_delta_sent = True
+                                ttft_ms = (time.perf_counter() - t_req_start) * 1000
+                                talos_evt.metadata["ttft_ms"] = round(ttft_ms, 2)
 
-                                    seq += 1
-                                    evt_bytes = talos_evt.to_sse_bytes(event_id=seq)
-                                    replay_buffer.record_event_background(stream_id, evt_bytes, seq)
-                                    yield evt_bytes
+                            seq += 1
+                            evt_bytes = talos_evt.to_sse_bytes(event_id=seq)
+                            replay_buffer.record_event_background(stream_id, evt_bytes, seq)
+                            yield evt_bytes
 
-                        # Flush remaining parsed messages
-                        for sse_msg in parser.flush():
-                            for talos_evt in adapter.process_message(sse_msg):
-                                seq += 1
-                                evt_bytes = talos_evt.to_sse_bytes(event_id=seq)
-                                replay_buffer.record_event_background(stream_id, evt_bytes, seq)
-                                yield evt_bytes
+                # Flush remaining parsed messages
+                for sse_msg in parser.flush():
+                    for talos_evt in adapter.process_message(sse_msg):
+                        seq += 1
+                        evt_bytes = talos_evt.to_sse_bytes(event_id=seq)
+                        replay_buffer.record_event_background(stream_id, evt_bytes, seq)
+                        yield evt_bytes
 
         except (httpx.RemoteProtocolError, httpx.ReadTimeout, httpx.ConnectTimeout) as e:
             if not sm.is_terminal:
@@ -348,6 +413,17 @@ class RelayService:
                     replay_buffer.record_event_background(stream_id, fail_bytes, seq)
                     yield fail_bytes
         finally:
+            if response is not None:
+                try:
+                    await response.aclose()
+                except Exception:
+                    pass
+            if active_client is not None:
+                try:
+                    await active_client.aclose()
+                except Exception:
+                    pass
+
             # Guarantee exactly ONE terminal event
             if not sm.is_terminal:
                 if disconnected:
