@@ -173,7 +173,7 @@ class RelayService:
         if provider_result is None:
             if reservation is not None:
                 await self.wallet_engine.release(reservation.reservation_id)
-            err_str = str(last_dispatch_err)
+            err_str = str(last_dispatch_err or "")
             if "429" in err_str or "too many requests" in err_str.lower():
                 from fastapi import HTTPException
                 raise HTTPException(
@@ -181,6 +181,9 @@ class RelayService:
                     detail="The AI service is currently busy or rate-limited. Please retry in a moment.",
                 )
             raise RuntimeError(f"Provider call failed for capability '{capability_id}': {last_dispatch_err}") from last_dispatch_err
+
+        if raw_response is None:
+            raise RuntimeError(f"Provider returned no raw response for capability '{capability_id}'")
 
         # ── Step 3: Metering & Credit Calculation ───────────────────────────
         metering_events = self._extract_metering_events(
@@ -261,7 +264,7 @@ class RelayService:
         """
         import time
         from app.services.stream_parser import IncrementalSSEParser
-        from app.services.stream_adapter import ProviderStreamAdapter, StreamStateMachine
+        from app.services.stream_adapter import ProviderStreamAdapter, StreamState, StreamStateMachine
         from app.services.stream_buffer import replay_buffer
 
         acc_uuid = account_id if isinstance(account_id, uuid.UUID) else uuid.UUID(str(account_id))

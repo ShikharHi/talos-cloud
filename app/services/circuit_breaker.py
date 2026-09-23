@@ -125,7 +125,7 @@ class ProviderCircuitBreaker:
             self._consecutive_failures[p] = 0
             self._last_state_change[p] = now
 
-    async def record_failure(self, provider: str, error: Optional[Exception] = None) -> None:
+    async def record_failure(self, provider: str, error: Exception | int | str | None = None) -> None:
         """Records a provider failure. If threshold reached, trips circuit to OPEN."""
         p = provider.lower().strip()
         now = time.time()
