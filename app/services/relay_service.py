@@ -279,7 +279,18 @@ class RelayService:
                     if response.status_code != 200:
                         err_text = await response.aread()
                         err_msg = err_text.decode("utf-8", errors="replace")
-                        fail_evt = sm.transition_failed(f"Upstream provider returned HTTP {response.status_code}: {err_msg}")
+                        logger.warning("Upstream provider %s returned HTTP %s: %s", provider, response.status_code, err_msg)
+                        if response.status_code == 429:
+                            clean_msg = "The model service is temporarily busy. Please try again in a moment."
+                            err_code = "rate_limit_exceeded"
+                        elif response.status_code >= 500:
+                            clean_msg = "Upstream model service encountered a temporary error. Please try again."
+                            err_code = "upstream_service_error"
+                        else:
+                            clean_msg = "Model generation failed. Please try again."
+                            err_code = "upstream_error"
+
+                        fail_evt = sm.transition_failed(clean_msg, code=err_code)
                         if fail_evt:
                             seq += 1
                             fail_bytes = fail_evt.to_sse_bytes(event_id=seq)
