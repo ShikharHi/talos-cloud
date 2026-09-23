@@ -213,12 +213,16 @@ class RelayService:
     ) -> AsyncIterator[bytes]:
         """
         Streaming relay call with:
-        - Exact token usage extraction (no len(chunk)//4 heuristic)
-        - Client disconnect detection and prompt provider stream cancellation
-        - Sequence-numbered SSE chunks (id: {seq}) with 60s replay buffer
-        - Atomic credit reconciliation on partial completion or stream failure.
+        - Canonical Incremental SSE parsing (reconstructing complete events across TCP chunk boundaries)
+        - Provider normalization adapter producing Talos native stream events
+        - Strict StreamStateMachine guaranteeing exactly ONE terminal state (COMPLETED, FAILED, CANCELLED)
+        - Immediate delta forwarding (no blocking replay/database in live path)
+        - Out-of-band non-blocking event replay recording
+        - Cancellation-safe credit reconciliation (no orphaned reservations)
         """
-        import json
+        import time
+        from app.services.stream_parser import IncrementalSSEParser
+        from app.services.stream_adapter import ProviderStreamAdapter, StreamStateMachine
         from app.services.stream_buffer import replay_buffer
 
         acc_uuid = account_id if isinstance(account_id, uuid.UUID) else uuid.UUID(str(account_id))
@@ -251,69 +255,110 @@ class RelayService:
             model_id = self._fallback_model_id(capability_id)
 
         stream_id = task_id or str(uuid.uuid4())
-        yielded_any = False
-        chunks_count = 0
-        exact_tokens_found: int = 0
+        sm = StreamStateMachine(stream_id)
+        adapter = ProviderStreamAdapter(provider, sm)
+        parser = IncrementalSSEParser()
+
+        # Emit stream.start immediately to inform downstream client
+        start_evt = sm.transition_started()
+        seq = 1
+        start_bytes = start_evt.to_sse_bytes(event_id=seq)
+        replay_buffer.record_event_background(stream_id, start_bytes, seq)
+        yield start_bytes
+
         url, headers, body = await self._build_provider_request(provider, model_id, payload)
         stream_timeout = self._get_timeout_for_capability(capability_id)
 
         disconnected = False
+        t_req_start = time.perf_counter()
+        first_delta_sent = False
+
         try:
             async with httpx.AsyncClient(timeout=stream_timeout) as client:
                 async with client.stream("POST", url, headers=headers, json=body) as response:
-                    async for chunk in response.aiter_bytes():
-                        # Client disconnect detection (Task 28)
-                        if request and await request.is_disconnected():
-                            logger.info("Client disconnected during stream for task '%s'. Cancelling upstream stream.", task_id)
-                            disconnected = True
-                            break
+                    if response.status_code != 200:
+                        err_text = await response.aread()
+                        err_msg = err_text.decode("utf-8", errors="replace")
+                        fail_evt = sm.transition_failed(f"Upstream provider returned HTTP {response.status_code}: {err_msg}")
+                        if fail_evt:
+                            seq += 1
+                            fail_bytes = fail_evt.to_sse_bytes(event_id=seq)
+                            replay_buffer.record_event_background(stream_id, fail_bytes, seq)
+                            yield fail_bytes
+                    else:
+                        async for raw_chunk in response.aiter_bytes():
+                            # Client disconnect detection
+                            if request and await request.is_disconnected():
+                                logger.info("Client disconnected during stream for task '%s'. Cancelling upstream stream.", task_id)
+                                disconnected = True
+                                canc_evt = sm.transition_cancelled()
+                                if canc_evt:
+                                    seq += 1
+                                    canc_bytes = canc_evt.to_sse_bytes(event_id=seq)
+                                    replay_buffer.record_event_background(stream_id, canc_bytes, seq)
+                                    yield canc_bytes
+                                break
 
-                        # Exact token usage extraction (Task 27)
-                        chunk_str = chunk.decode("utf-8", errors="replace")
-                        if "usage" in chunk_str or "usageMetadata" in chunk_str:
-                            try:
-                                for line in chunk_str.split("\n"):
-                                    line = line.strip()
-                                    if line.startswith("data:"):
-                                        d_text = line[len("data:"):].strip()
-                                        if d_text and d_text != "[DONE]":
-                                            d_json = json.loads(d_text)
-                                            if "usage" in d_json and d_json["usage"]:
-                                                u = d_json["usage"]
-                                                t = u.get("total_tokens") or (u.get("prompt_tokens", 0) + u.get("completion_tokens", 0))
-                                                if t > 0:
-                                                    exact_tokens_found = t
-                                            elif "usageMetadata" in d_json:
-                                                u = d_json["usageMetadata"]
-                                                t = u.get("totalTokenCount", 0)
-                                                if t > 0:
-                                                    exact_tokens_found = t
-                            except Exception:
-                                pass
+                            # Feed raw bytes incrementally to reconstruct complete SSE messages
+                            for sse_msg in parser.feed(raw_chunk):
+                                for talos_evt in adapter.process_message(sse_msg):
+                                    if not first_delta_sent and talos_evt.type == "stream.delta":
+                                        first_delta_sent = True
+                                        ttft_ms = (time.perf_counter() - t_req_start) * 1000
+                                        talos_evt.metadata["ttft_ms"] = round(ttft_ms, 2)
 
-                        chunks_count += 1
-                        yielded_any = True
-                        formatted = await replay_buffer.record_and_format_chunk(stream_id, chunk)
-                        yield formatted
+                                    seq += 1
+                                    evt_bytes = talos_evt.to_sse_bytes(event_id=seq)
+                                    replay_buffer.record_event_background(stream_id, evt_bytes, seq)
+                                    yield evt_bytes
+
+                        # Flush remaining parsed messages
+                        for sse_msg in parser.flush():
+                            for talos_evt in adapter.process_message(sse_msg):
+                                seq += 1
+                                evt_bytes = talos_evt.to_sse_bytes(event_id=seq)
+                                replay_buffer.record_event_background(stream_id, evt_bytes, seq)
+                                yield evt_bytes
 
         except (httpx.RemoteProtocolError, httpx.ReadTimeout, httpx.ConnectTimeout) as e:
-            if yielded_any:
-                yield b"data: [DONE]\n\n"
-            else:
-                if reservation is not None:
-                    await self.wallet_engine.release(reservation.reservation_id)
-                raise RuntimeError(f"Provider stream failed: {e}") from e
-        else:
-            yield b"data: [DONE]\n\n"
+            if not sm.is_terminal:
+                fail_evt = sm.transition_failed(str(e), code="provider_connection_error")
+                if fail_evt:
+                    seq += 1
+                    fail_bytes = fail_evt.to_sse_bytes(event_id=seq)
+                    replay_buffer.record_event_background(stream_id, fail_bytes, seq)
+                    yield fail_bytes
+        except Exception as e:
+            if not sm.is_terminal:
+                fail_evt = sm.transition_failed(str(e), code="internal_stream_error")
+                if fail_evt:
+                    seq += 1
+                    fail_bytes = fail_evt.to_sse_bytes(event_id=seq)
+                    replay_buffer.record_event_background(stream_id, fail_bytes, seq)
+                    yield fail_bytes
+        finally:
+            # Guarantee exactly ONE terminal event
+            if not sm.is_terminal:
+                if disconnected:
+                    canc_evt = sm.transition_cancelled()
+                    if canc_evt:
+                        seq += 1
+                        canc_bytes = canc_evt.to_sse_bytes(event_id=seq)
+                        replay_buffer.record_event_background(stream_id, canc_bytes, seq)
+                        yield canc_bytes
+                else:
+                    comp_evt = sm.transition_completed(finish_reason="stop")
+                    if comp_evt:
+                        seq += 1
+                        comp_bytes = comp_evt.to_sse_bytes(event_id=seq)
+                        replay_buffer.record_event_background(stream_id, comp_bytes, seq)
+                        yield comp_bytes
 
-        # Reconcile streaming call with financial solvency rules (Tasks 28, 29)
-        provider_actual_units = exact_tokens_found if exact_tokens_found > 0 else max(1, chunks_count)
-        client_delivered_units = min(provider_actual_units, max(1, chunks_count))
-
-        # Stream Billing Policy: charge_actual (protects Talos COGS) or charge_delivered (absorbs delta)
+        # Reconcile billing atomically:
+        provider_actual_units = sm.exact_tokens if sm.exact_tokens > 0 else max(1, sm.deltas_count)
         billing_policy = getattr(self.settings, "stream_billing_policy", "charge_actual")
         if billing_policy == "charge_delivered" and disconnected:
-            billed_units = client_delivered_units
+            billed_units = min(provider_actual_units, max(1, sm.deltas_count))
         else:
             billed_units = provider_actual_units
 
@@ -332,16 +377,19 @@ class RelayService:
             stream_event.provider_cost_usd = cost_usd
             stream_event.credits_charged = actual_credits
             stream_event.metadata = {
-                "provider_actual_units": provider_actual_units,
-                "client_delivered_units": client_delivered_units,
+                "terminal_state": sm.current_state.value,
+                "deltas_count": sm.deltas_count,
                 "interrupted": disconnected,
                 "billing_policy": billing_policy,
             }
             await self._persist_usage_event(acc_uuid, stream_event)
 
             if reservation is not None and not is_unlimited:
-                # Commits billed units and releases all excess held credits atomically
-                await self.wallet_engine.commit(reservation.reservation_id, actual_credits)
+                if sm.current_state == StreamState.FAILED and sm.deltas_count == 0:
+                    # If total failure before any output, release reservation in full
+                    await self.wallet_engine.release(reservation.reservation_id)
+                else:
+                    await self.wallet_engine.commit(reservation.reservation_id, actual_credits)
 
             await self._log_pricing_event(
                 account_id=acc_uuid,
@@ -356,6 +404,11 @@ class RelayService:
             )
         except Exception as e:
             logger.warning("Error recording stream usage reconciliation: %s", e)
+            if reservation is not None and not is_unlimited:
+                try:
+                    await self.wallet_engine.release(reservation.reservation_id)
+                except Exception:
+                    pass
 
 
     # ─── Internal Dispatch & Metering Helpers ─────────────────────────────────

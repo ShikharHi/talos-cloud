@@ -20,11 +20,14 @@ from app.database import get_db
 from app.services.auth_service import get_account_for_token
 from app.services.concurrency_limiter import (
     acquire_concurrency,
+    acquire_concurrency_lease,
     check_and_acquire_concurrency,
     release_concurrency,
+    release_concurrency_lease,
 )
 from app.services.relay_service import InsufficientCreditsError, RelayService
 from app.services.stream_buffer import replay_buffer
+from app.services.stream_parser import TalosStreamEvent, StreamEventType
 
 router = APIRouter(prefix="/relay", tags=["relay"])
 router_v1 = APIRouter(prefix="/api/v1/llm", tags=["llm-relay-v1"])
@@ -124,9 +127,9 @@ async def relay_stream(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Streaming relay call. Streams provider response chunk-by-chunk.
+    Streaming relay call. Streams Talos native events chunk-by-chunk.
     Supports SSE Last-Event-ID replay without re-charging or re-dispatching.
-    Guarded by per-account tier concurrency limiter.
+    Guarded by per-account tier concurrency lease with guaranteed release.
     Provider name is NEVER in any chunk.
     """
     # 1. Check replay buffer if Last-Event-ID reconnection requested
@@ -142,9 +145,9 @@ async def relay_stream(
         except (ValueError, TypeError):
             pass
 
-    # 2. Acquire concurrency slot before starting stream
+    # 2. Acquire concurrency lease before starting stream
     tier = getattr(account, "subscription_tier", "free") or "free"
-    await acquire_concurrency(account.account_id, tier)
+    lease_id = await acquire_concurrency_lease(account.account_id, tier)
 
     service = RelayService(db)
 
@@ -160,16 +163,18 @@ async def relay_stream(
             ):
                 yield chunk
         except InsufficientCreditsError as e:
-            # Emit a structured error chunk before closing stream
-            err = json.dumps({
-                "error": "insufficient_credits",
-                "required_credits": e.required,
-                "current_balance": e.current,
-                # No 'provider' field
-            }).encode()
-            yield b"data: " + err + b"\n\n"
+            # Emit structured Talos error event before closing stream
+            err_evt = TalosStreamEvent(
+                type=StreamEventType.ERROR.value,
+                stream_id=req.task_id,
+                error={
+                    "code": "insufficient_credits",
+                    "message": f"Insufficient credits: required {e.required}, available {e.current}",
+                },
+            )
+            yield err_evt.to_sse_bytes()
         finally:
-            await release_concurrency(account.account_id)
+            await release_concurrency_lease(account.account_id, lease_id)
 
     return StreamingResponse(_stream(), media_type="text/event-stream")
 
