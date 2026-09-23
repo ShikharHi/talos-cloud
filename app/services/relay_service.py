@@ -139,36 +139,48 @@ class RelayService:
         model_id = candidates[0][1]
 
         for cand_provider, cand_model in candidates:
-            try:
+            max_attempts = 2 if len(candidates) == 1 else 1
+            for cand_attempt in range(max_attempts):
                 try:
-                    provider_result, raw_response = await self._dispatch(
+                    try:
+                        provider_result, raw_response = await self._dispatch(
+                            capability_id,
+                            payload,
+                            provider=cand_provider,
+                            model_id=cand_model,
+                        )
+                    except TypeError:
+                        provider_result, raw_response = await self._dispatch(
+                            capability_id,
+                            payload,
+                        )
+                    provider = cand_provider
+                    model_id = cand_model
+                    last_dispatch_err = None
+                    break
+                except Exception as e:
+                    last_dispatch_err = e
+                    err_msg = str(e).lower()
+                    logger.warning(
+                        "Provider '%s' dispatch failed for capability '%s' (attempt %s/%s): %s",
+                        cand_provider,
                         capability_id,
-                        payload,
-                        provider=cand_provider,
-                        model_id=cand_model,
+                        cand_attempt + 1,
+                        max_attempts,
+                        e,
                     )
-                except TypeError:
-                    provider_result, raw_response = await self._dispatch(
-                        capability_id,
-                        payload,
-                    )
-                provider = cand_provider
-                model_id = cand_model
-                last_dispatch_err = None
+                    if ("429" in err_msg or "503" in err_msg or "overloaded" in err_msg) and cand_attempt < max_attempts - 1:
+                        await asyncio.sleep(2.0)
+                        continue
+                    try:
+                        from app.services.circuit_breaker import circuit_breaker
+                        await circuit_breaker.record_failure(cand_provider, 429 if "429" in str(e) else 500)
+                    except Exception:
+                        pass
+                    break
+
+            if provider_result is not None:
                 break
-            except Exception as e:
-                last_dispatch_err = e
-                logger.warning(
-                    "Provider '%s' dispatch failed for capability '%s': %s. Trying fallback candidate if available...",
-                    cand_provider,
-                    capability_id,
-                    e,
-                )
-                try:
-                    from app.services.circuit_breaker import circuit_breaker
-                    await circuit_breaker.record_failure(cand_provider, 429 if "429" in str(e) else 500)
-                except Exception:
-                    pass
 
         if provider_result is None:
             if reservation is not None:
@@ -332,22 +344,35 @@ class RelayService:
             provider = cand_provider
             model_id = cand_model
             adapter = ProviderStreamAdapter(provider, sm)
-            try:
-                url, headers, body = await self._build_provider_request(provider, model_id, payload)
-                client = httpx.AsyncClient(timeout=stream_timeout)
-                resp = await client.send(client.build_request("POST", url, headers=headers, json=body), stream=True)
-                if resp.status_code == 200:
-                    response = resp
-                    active_client = client
+            max_attempts = 2 if len(candidates) == 1 else 1
+            for cand_attempt in range(max_attempts):
+                try:
+                    url, headers, body = await self._build_provider_request(provider, model_id, payload)
+                    client = httpx.AsyncClient(timeout=stream_timeout)
+                    resp = await client.send(client.build_request("POST", url, headers=headers, json=body), stream=True)
+                    if resp.status_code == 200:
+                        response = resp
+                        active_client = client
+                        break
+                    else:
+                        last_resp_code = resp.status_code
+                        err_bytes = await resp.aread()
+                        await resp.aclose()
+                        await client.aclose()
+                        logger.warning(
+                            "Provider '%s' returned HTTP %s for stream (attempt %s/%s): %s",
+                            provider, resp.status_code, cand_attempt + 1, max_attempts, err_bytes[:200]
+                        )
+                        if resp.status_code in (429, 503) and cand_attempt < max_attempts - 1:
+                            await asyncio.sleep(2.0)
+                            continue
+                        break
+                except Exception as e:
+                    logger.warning("Provider '%s' connection failed for stream: %s. Trying fallback candidate...", provider, e)
                     break
-                else:
-                    last_resp_code = resp.status_code
-                    await resp.aread()
-                    await resp.aclose()
-                    await client.aclose()
-                    logger.warning("Provider '%s' returned HTTP %s for stream. Trying fallback candidate...", provider, resp.status_code)
-            except Exception as e:
-                logger.warning("Provider '%s' connection failed for stream: %s. Trying fallback candidate...", provider, e)
+
+            if response is not None:
+                break
 
         try:
             if response is None:
