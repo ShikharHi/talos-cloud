@@ -423,6 +423,49 @@ async def get_session_profile(session: WebSession = Depends(get_current_session)
     )
 
 
+@router.get("/me")
+async def get_any_me(
+    authorization: Optional[str] = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Introspection endpoint for either Web Session JWTs or Device Tokens.
+    Allows runtime and client to verify identity seamlessly.
+    """
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing Bearer token.")
+
+    token = authorization.removeprefix("Bearer ").strip()
+
+    # 1. Try Device Token
+    if token.startswith("dtok_") or token.startswith("talos_") or token.startswith("dt_"):
+        dt = await auth_service.authenticate_token(db, token)
+        if dt:
+            account = await db.get(Account, dt.account_id)
+            if account:
+                return {
+                    "id": str(account.account_id),
+                    "account_id": str(account.account_id),
+                    "email": account.email,
+                    "role": account.role,
+                    "subscription_tier": account.subscription_tier,
+                }
+
+    # 2. Try Web Session
+    try:
+        session = identity_service.verify_web_session(token)
+        return {
+            "id": str(session.account_id),
+            "account_id": str(session.account_id),
+            "email": session.email,
+            "role": session.role,
+        }
+    except Exception:
+        pass
+
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token.")
+
+
 # ─── Device Registration Endpoints (Gated by Web Session) ─────────────────────
 
 @router.post(
