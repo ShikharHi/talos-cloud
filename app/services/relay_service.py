@@ -119,18 +119,22 @@ class RelayService:
 
         # ── Step 2: Resolve Provider Routing & Dispatch ──────────────────────
         candidates: list[tuple[str, str]] = []
-        try:
-            p_primary, m_primary = await self.resolve_provider_routing(capability_id)
-            candidates.append((p_primary, m_primary))
-        except Exception:
-            pass
+        req_model = payload.get("model")
+        if req_model and (req_model.startswith("glm-") or "zhipu" in req_model or "flash" in req_model):
+            candidates.append(("zhipu", req_model))
+        else:
+            try:
+                p_primary, m_primary = await self.resolve_provider_routing(capability_id)
+                candidates.append((p_primary, m_primary))
+            except Exception:
+                pass
 
         for p_fb, m_fb in DEFAULT_FALLBACK_CHAINS.get(capability_id, []):
             if (p_fb, m_fb) not in candidates and self._has_credentials(p_fb):
                 candidates.append((p_fb, m_fb))
 
         if not candidates:
-            candidates.append((self._fallback_provider(capability_id), self._fallback_model_id(capability_id)))
+            candidates.append(("zhipu", req_model if (req_model and req_model.startswith("glm-")) else self._fallback_model_id(capability_id)))
 
         provider_result = None
         raw_response = None
@@ -303,18 +307,22 @@ class RelayService:
             )
 
         candidates: list[tuple[str, str]] = []
-        try:
-            p_primary, m_primary = await self.resolve_provider_routing(capability_id)
-            candidates.append((p_primary, m_primary))
-        except Exception:
-            pass
+        req_model = payload.get("model")
+        if req_model and (req_model.startswith("glm-") or "zhipu" in req_model or "flash" in req_model):
+            candidates.append(("zhipu", req_model))
+        else:
+            try:
+                p_primary, m_primary = await self.resolve_provider_routing(capability_id)
+                candidates.append((p_primary, m_primary))
+            except Exception:
+                pass
 
         for p_fb, m_fb in DEFAULT_FALLBACK_CHAINS.get(capability_id, []):
             if (p_fb, m_fb) not in candidates and self._has_credentials(p_fb):
                 candidates.append((p_fb, m_fb))
 
         if not candidates:
-            candidates.append((self._fallback_provider(capability_id), self._fallback_model_id(capability_id)))
+            candidates.append(("zhipu", req_model if (req_model and req_model.startswith("glm-")) else self._fallback_model_id(capability_id)))
 
         provider = candidates[0][0]
         model_id = candidates[0][1]
@@ -900,7 +908,7 @@ class RelayService:
         chain = DEFAULT_FALLBACK_CHAINS.get(capability_id)
         if chain:
             return chain[0][1]
-        return "default"
+        return "glm-4.5-flash"
 
     async def resolve_provider_routing(self, capability_id: str) -> tuple[str, str]:
         """
@@ -941,16 +949,16 @@ DEFAULT_FALLBACK_CHAINS: dict[str, list[tuple[str, str]]] = {
         ("gemini", "gemini-2.0-flash"),
     ],
     "code_model": [
+        ("zhipu", "glm-4.5-flash"),
         ("anthropic", "claude-3-5-sonnet-20241022"),
         ("openai", "gpt-4o"),
         ("deepseek", "deepseek-coder"),
-        ("zhipu", "glm-4.5-flash"),
     ],
     "vision_model": [
+        ("zhipu", "glm-4.6v-flash"),
         ("openai", "gpt-4o"),
         ("anthropic", "claude-3-5-sonnet-20241022"),
         ("gemini", "gemini-2.0-flash"),
-        ("zhipu", "glm-4.6v-flash"),
     ],
     "web_search": [
         ("tavily", "tavily-search"),
@@ -959,7 +967,7 @@ DEFAULT_FALLBACK_CHAINS: dict[str, list[tuple[str, str]]] = {
         ("internal", "talos-browser-runner"),
     ],
     "image_gen": [
-        ("openai", "dall-e-3"),
         ("zhipu", "cogview-4-250304"),
+        ("openai", "dall-e-3"),
     ],
 }
