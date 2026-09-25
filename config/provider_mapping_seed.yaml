@@ -4,38 +4,26 @@
 
 provider_mapping:
   - capability_id: reasoning_model
-    provider: zhipu
-    model_id: glm-4.5-flash
-    priority: 1
-    active: true
-
-  - capability_id: reasoning_model
-    provider: zhipu
-    model_id: glm-4.5-flash
-    priority: 2   # fallback
-    active: true
-
-  - capability_id: code_model
-    provider: zhipu
-    model_id: glm-4.5-flash
+    provider: mistral
+    model_id: codestral-2508
     priority: 1
     active: true
 
   - capability_id: code_model
-    provider: zhipu
-    model_id: glm-4.5-flash
-    priority: 2   # fallback
+    provider: mistral
+    model_id: codestral-2508
+    priority: 1
     active: true
 
   - capability_id: fast_model
-    provider: zhipu
-    model_id: glm-4.5-flash
+    provider: mistral
+    model_id: codestral-2508
     priority: 1
     active: true
 
   - capability_id: vision_model
-    provider: zhipu
-    model_id: glm-4.6v-flash
+    provider: mistral
+    model_id: codestral-2508
     priority: 1
     active: true
 

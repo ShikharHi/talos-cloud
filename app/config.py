@@ -71,6 +71,8 @@ class Settings(BaseSettings):
     rate_limit_enabled: bool = True
     rate_limit_fail_closed: bool = False
     concurrency_fail_closed: bool = False
+    # Billing & Credit Control
+    enable_credit_system: bool = False
     stream_billing_policy: str = "charge_actual"  # "charge_actual" or "charge_delivered"
 
     # Inngest Configuration
@@ -83,6 +85,8 @@ class Settings(BaseSettings):
     # These are used exclusively inside relay_service.py when dispatching
     # real provider calls. If any of these values ever appear in a response
     # payload sent to a local client, that is a critical security bug.
+    mistral_api_key: str | None = None
+    mistral_api_key_previous: str | None = None
     anthropic_api_key: str | None = None
     anthropic_api_key_previous: str | None = None
     tavily_api_key: str | None = None

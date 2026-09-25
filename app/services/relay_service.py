@@ -81,8 +81,9 @@ class RelayService:
         """
         acc_uuid = account_id if isinstance(account_id, uuid.UUID) else uuid.UUID(str(account_id))
 
-        # Check if user is admin / unlimited tier
-        is_unlimited = await self._is_unlimited_account(acc_uuid)
+        # Check if credit system is globally disabled or user is admin / unlimited tier
+        credit_system_enabled = getattr(self.settings, "enable_credit_system", False)
+        is_unlimited = (not credit_system_enabled) or (await self._is_unlimited_account(acc_uuid))
 
         # Estimate worst-case credits to hold
         worst_case_event = MeteringEvent(
@@ -120,8 +121,8 @@ class RelayService:
         # ── Step 2: Resolve Provider Routing & Dispatch ──────────────────────
         candidates: list[tuple[str, str]] = []
         req_model = payload.get("model")
-        if req_model and (req_model.startswith("glm-") or "zhipu" in req_model or "flash" in req_model):
-            candidates.append(("zhipu", req_model))
+        if req_model and ("mistral" in req_model.lower() or "codestral" in req_model.lower()):
+            candidates.append(("mistral", req_model))
         else:
             try:
                 p_primary, m_primary = await self.resolve_provider_routing(capability_id)
@@ -134,7 +135,7 @@ class RelayService:
                 candidates.append((p_fb, m_fb))
 
         if not candidates:
-            candidates.append(("zhipu", req_model if (req_model and req_model.startswith("glm-")) else self._fallback_model_id(capability_id)))
+            candidates.append(("mistral", "codestral-2508"))
 
         provider_result = None
         raw_response = None
@@ -284,7 +285,8 @@ class RelayService:
         from app.services.stream_buffer import replay_buffer
 
         acc_uuid = account_id if isinstance(account_id, uuid.UUID) else uuid.UUID(str(account_id))
-        is_unlimited = await self._is_unlimited_account(acc_uuid)
+        credit_system_enabled = getattr(self.settings, "enable_credit_system", False)
+        is_unlimited = (not credit_system_enabled) or (await self._is_unlimited_account(acc_uuid))
 
         worst_case_event = MeteringEvent(
             capability_id=capability_id,
@@ -308,8 +310,8 @@ class RelayService:
 
         candidates: list[tuple[str, str]] = []
         req_model = payload.get("model")
-        if req_model and (req_model.startswith("glm-") or "zhipu" in req_model or "flash" in req_model):
-            candidates.append(("zhipu", req_model))
+        if req_model and ("mistral" in req_model.lower() or "codestral" in req_model.lower()):
+            candidates.append(("mistral", req_model))
         else:
             try:
                 p_primary, m_primary = await self.resolve_provider_routing(capability_id)
@@ -322,7 +324,7 @@ class RelayService:
                 candidates.append((p_fb, m_fb))
 
         if not candidates:
-            candidates.append(("zhipu", req_model if (req_model and req_model.startswith("glm-")) else self._fallback_model_id(capability_id)))
+            candidates.append(("mistral", "codestral-2508"))
 
         provider = candidates[0][0]
         model_id = candidates[0][1]
@@ -642,7 +644,9 @@ class RelayService:
     def _get_provider_credentials(self, provider: str, settings) -> tuple[str, str | None, str]:
         """Returns (primary_key, secondary_key, base_url)."""
         p = provider.lower().strip()
-        if p == "anthropic":
+        if p == "mistral":
+            return self._normalize_key(settings.mistral_api_key), self._normalize_key(settings.mistral_api_key_previous) or None, "https://api.mistral.ai/v1"
+        elif p == "anthropic":
             return self._normalize_key(settings.anthropic_api_key), self._normalize_key(settings.anthropic_api_key_previous) or None, "https://api.anthropic.com/v1"
         elif p == "openai":
             return self._normalize_key(settings.openai_api_key), self._normalize_key(settings.openai_api_key_previous) or None, "https://api.openai.com/v1"
@@ -901,14 +905,14 @@ class RelayService:
         chain = DEFAULT_FALLBACK_CHAINS.get(capability_id)
         if chain:
             return chain[0][0]
-        return "zhipu"
+        return "mistral"
 
     @classmethod
     def _fallback_model_id(cls, capability_id: str) -> str:
         chain = DEFAULT_FALLBACK_CHAINS.get(capability_id)
         if chain:
             return chain[0][1]
-        return "glm-4.5-flash"
+        return "codestral-2508"
 
     async def resolve_provider_routing(self, capability_id: str) -> tuple[str, str]:
         """
@@ -927,7 +931,7 @@ class RelayService:
             pass
 
         # 2. Iterate capability fallback chain
-        chain = DEFAULT_FALLBACK_CHAINS.get(capability_id, [("zhipu", "glm-4.5-flash")])
+        chain = DEFAULT_FALLBACK_CHAINS.get(capability_id, [("mistral", "codestral-2508")])
         for p, m in chain:
             if await circuit_breaker.can_execute(p) and self._has_credentials(p):
                 return p, m
@@ -938,27 +942,16 @@ class RelayService:
 
 DEFAULT_FALLBACK_CHAINS: dict[str, list[tuple[str, str]]] = {
     "reasoning_model": [
-        ("zhipu", "glm-4.5-flash"),
-        ("anthropic", "claude-3-7-sonnet-20250219"),
-        ("openai", "o3-mini"),
-        ("deepseek", "deepseek-reasoner"),
+        ("mistral", "codestral-2508"),
     ],
     "fast_model": [
-        ("zhipu", "glm-4.5-flash"),
-        ("openai", "gpt-4o-mini"),
-        ("gemini", "gemini-2.0-flash"),
+        ("mistral", "codestral-2508"),
     ],
     "code_model": [
-        ("zhipu", "glm-4.5-flash"),
-        ("anthropic", "claude-3-5-sonnet-20241022"),
-        ("openai", "gpt-4o"),
-        ("deepseek", "deepseek-coder"),
+        ("mistral", "codestral-2508"),
     ],
     "vision_model": [
-        ("zhipu", "glm-4.6v-flash"),
-        ("openai", "gpt-4o"),
-        ("anthropic", "claude-3-5-sonnet-20241022"),
-        ("gemini", "gemini-2.0-flash"),
+        ("mistral", "codestral-2508"),
     ],
     "web_search": [
         ("tavily", "tavily-search"),

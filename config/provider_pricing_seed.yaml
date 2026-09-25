@@ -4,6 +4,16 @@
 # All costs in USD per 1M tokens (or per call/image as noted).
 
 provider_pricing:
+  # ── Mistral ──────────────────────────────────────────────────────────────────
+  - provider: mistral
+    model_id: codestral-2508
+    pricing_type: token
+    input_cost_usd_per_1m: 0.30
+    output_cost_usd_per_1m: 0.90
+    source_url: https://docs.mistral.ai/api
+    version: mistral-2026-09
+    active: true
+
   # ── Anthropic ────────────────────────────────────────────────────────────────
   - provider: anthropic
     model_id: claude-sonnet-4-6
