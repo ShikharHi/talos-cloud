@@ -262,10 +262,9 @@ def verify_web_session(token: str) -> WebSession:
 
 
     token_type = payload.get("type")
-    if token_type != "web_session":
+    if token_type not in ("web_session", "access_token"):
         raise InvalidSessionError(
-            f"Expected token type 'web_session', got '{token_type}'. "
-            "Device tokens cannot be used as web sessions."
+            f"Expected token type 'web_session' or 'access_token', got '{token_type}'."
         )
 
     sub = payload.get("sub")
@@ -365,7 +364,10 @@ async def rotate_refresh_token(
     except ValueError as e:
         raise InvalidSessionError("Invalid session_id in refresh token.") from e
 
-    record = await db.get(WebSessionRecord, session_id)
+    # Atomic lock session record to prevent concurrent double-refresh race conditions
+    stmt = select(WebSessionRecord).where(WebSessionRecord.session_id == session_id).with_for_update()
+    res = await db.execute(stmt)
+    record = res.scalar_one_or_none()
     if record is None:
         raise InvalidSessionError("Session record not found.")
 

@@ -7,9 +7,12 @@ See tests/test_relay.py::test_provider_field_never_in_relay_response.
 """
 
 import json
+import logging
 import os
 import uuid
 from typing import AsyncIterator
+
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
@@ -65,11 +68,52 @@ async def get_authenticated_account(
     raw_token = authorization.removeprefix("Bearer ").strip()
 
     # 1. Try standard device token (bcrypt hash)
-    account = await get_account_for_token(db, raw_token)
-    if account is not None:
-        return account
+    if raw_token.startswith("dtok_") or raw_token.startswith("dt_") or raw_token.startswith("talos_"):
+        if not raw_token.startswith("talos_sk_"):
+            account = await get_account_for_token(db, raw_token)
+            if account is not None:
+                if account.status != "active":
+                    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account is suspended or inactive.")
+                return account
 
-    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired device token.")
+    # 2. Try API key
+    if raw_token.startswith("talos_sk_"):
+        from app.services import cloud_identity_service
+        api_res = await cloud_identity_service.authenticate_api_key(db, raw_token)
+        if api_res:
+            acc, _ = api_res
+            return acc
+
+    # 3. Try Cloud Access Token / Web Session (RS256 JWT)
+    try:
+        from app.services import identity_service
+        from app.models.accounts import Account, Session as SessionModel, Device as DeviceModel
+        token_session = identity_service.verify_web_session(raw_token)
+        if token_session and token_session.account_id:
+            # Check Redis / DB revocation
+            if token_session.session_id:
+                if await identity_service.is_session_revoked_cache(token_session.session_id):
+                    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session has been revoked.")
+                sess_rec = await db.get(SessionModel, token_session.session_id)
+                if sess_rec:
+                    if sess_rec.is_revoked or sess_rec.is_expired:
+                        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session is revoked or expired.")
+                    if sess_rec.device_id:
+                        dev_rec = await db.get(DeviceModel, sess_rec.device_id)
+                        if dev_rec and dev_rec.is_revoked:
+                            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Device has been revoked.")
+
+            account = await db.get(Account, token_session.account_id)
+            if account:
+                if account.status != "active":
+                    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account is suspended or inactive.")
+                return account
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning("Token verification in relay failed: %s", e, exc_info=True)
+
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid, revoked, or expired authentication credential.")
 
 
 

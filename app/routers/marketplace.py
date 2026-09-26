@@ -203,28 +203,59 @@ async def get_optional_account(
         raw_token = request.cookies.get("talos_session") or ""
 
     if raw_token:
-        # 1. Try web session JWT
+        # 1. Try Scoped API Key
+        if raw_token.startswith("talos_sk_"):
+            from app.services import cloud_identity_service
+            api_res = await cloud_identity_service.authenticate_api_key(db, raw_token)
+            if api_res:
+                acc, _ = api_res
+                return acc
+
+        # 2. Try web session / access token (RS256 JWT)
         try:
             from app.services.identity_service import verify_web_session
+            from app.models.accounts import Session as SessionModel, Device as DeviceModel
             ws = verify_web_session(raw_token)
             if ws and ws.account_id:
+                # Revocation verification
+                if ws.session_id:
+                    from app.services import identity_service
+                    if await identity_service.is_session_revoked_cache(ws.session_id):
+                        raise HTTPException(status_code=401, detail="Session has been revoked.")
+                    sess_rec = await db.get(SessionModel, ws.session_id)
+                    if sess_rec:
+                        if sess_rec.is_revoked or sess_rec.is_expired:
+                            raise HTTPException(status_code=401, detail="Session is revoked or expired.")
+                        if sess_rec.device_id:
+                            dev_rec = await db.get(DeviceModel, sess_rec.device_id)
+                            if dev_rec and dev_rec.is_revoked:
+                                raise HTTPException(status_code=401, detail="Device has been revoked.")
+
                 res = await db.execute(select(Account).where(Account.account_id == ws.account_id))
                 acc = res.scalars().first()
                 if acc:
+                    if acc.status != "active":
+                        raise HTTPException(status_code=403, detail="Account is suspended or inactive.")
                     return acc
+        except HTTPException:
+            raise
         except Exception:
             pass
 
-        # 2. Try device token
+        # 3. Try device token
         try:
             from app.services.auth_service import get_account_for_token
             acc = await get_account_for_token(db, raw_token)
             if acc:
+                if acc.status != "active":
+                    raise HTTPException(status_code=403, detail="Account is suspended or inactive.")
                 return acc
+        except HTTPException:
+            raise
         except Exception:
             pass
 
-    # 3. Dev / anonymous fallback
+    # 4. Dev / anonymous fallback
     res = await db.execute(select(Account).where(Account.role == "admin"))
     acc = res.scalars().first()
     if not acc:

@@ -4,7 +4,19 @@ Import all models here so SQLAlchemy discovers them for Alembic migrations
 and relationship resolution.
 """
 
-from app.models.accounts import Account, DeviceToken, WebSessionRecord  # noqa: F401
+from app.models.accounts import (  # noqa: F401
+    Account,
+    Identity,
+    Device,
+    Session,
+    ApiKey,
+    Organization,
+    OrganizationMember,
+    Project,
+    ProjectMember,
+    DeviceToken,
+    WebSessionRecord,
+)
 from app.models.billing import BillingTransaction, StripeCustomer  # noqa: F401
 from app.models.ledger import CreditTransaction, PricingEvent, TransactionType  # noqa: F401
 from app.models.pricing import PricingVersion  # noqa: F401
