@@ -33,10 +33,14 @@ class BaseManifest(BaseModel):
 
 
 class SkillManifest(BaseManifest):
-    """Manifest for Skills (SKILL.md frontmatter or skill.yaml)."""
+    """Manifest for Skills (SKILL.md frontmatter or skill.yaml) following OpenClaw/ClawHub standard."""
     kind: str = "skill"
+    slug: Optional[str] = None
     instructions: Optional[str] = None
     capabilities: List[str] = Field(default_factory=list)
+    metadata: Optional[dict[str, Any]] = None
+    requires_bins: List[str] = Field(default_factory=list)
+    requires_env: List[str] = Field(default_factory=list)
 
 
 class AgentManifest(BaseManifest):
