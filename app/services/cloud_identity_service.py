@@ -441,3 +441,147 @@ async def authenticate_api_key(db: AsyncSession, raw_key: str) -> tuple[Account,
     key_rec.last_used_at = _utcnow()
     await db.flush()
     return account, key_rec
+
+
+async def ensure_cloud_identity_schema(engine) -> None:
+    """
+    Idempotent schema bootstrapper ensuring all Cloud Identity V2 tables and columns
+    exist across development, test, and production database environments.
+    """
+    from sqlalchemy import text
+
+    async with engine.begin() as conn:
+        dialect_name = conn.dialect.name
+
+        # 1. Accounts columns
+        if dialect_name == "postgresql":
+            await conn.execute(text("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS display_name VARCHAR(255)"))
+            await conn.execute(text("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS avatar_url VARCHAR(500)"))
+
+            # 2. identities table
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS identities (
+                    identity_id UUID PRIMARY KEY,
+                    account_id UUID NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
+                    provider VARCHAR(50) NOT NULL,
+                    provider_subject VARCHAR(255) NOT NULL,
+                    email VARCHAR(255) NOT NULL,
+                    email_verified BOOLEAN NOT NULL DEFAULT TRUE,
+                    metadata_json TEXT,
+                    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+                    last_login_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+                    CONSTRAINT uq_provider_subject UNIQUE (provider, provider_subject)
+                )
+            """))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_identities_account_id ON identities(account_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_identities_email ON identities(email)"))
+
+            # 3. devices table
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS devices (
+                    device_id UUID PRIMARY KEY,
+                    account_id UUID NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
+                    device_name VARCHAR(255) NOT NULL,
+                    platform VARCHAR(50) NOT NULL,
+                    os_version VARCHAR(100),
+                    app_version VARCHAR(50),
+                    device_type VARCHAR(50) NOT NULL DEFAULT 'desktop',
+                    status VARCHAR(20) NOT NULL DEFAULT 'active',
+                    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+                    last_seen_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+                    revoked_at TIMESTAMP WITH TIME ZONE,
+                    metadata_json TEXT
+                )
+            """))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_devices_account_id ON devices(account_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_devices_status ON devices(status)"))
+
+            # 4. sessions table
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS sessions (
+                    session_id UUID PRIMARY KEY,
+                    account_id UUID NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
+                    device_id UUID REFERENCES devices(device_id) ON DELETE SET NULL,
+                    session_type VARCHAR(50) NOT NULL DEFAULT 'web',
+                    refresh_token_hash VARCHAR(255) NOT NULL,
+                    ip_address VARCHAR(100),
+                    user_agent VARCHAR(500),
+                    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+                    last_seen_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+                    expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                    revoked_at TIMESTAMP WITH TIME ZONE,
+                    metadata_json TEXT
+                )
+            """))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_sessions_account_id ON sessions(account_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_sessions_device_id ON sessions(device_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_sessions_revoked_at ON sessions(revoked_at)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_sessions_expires_at ON sessions(expires_at)"))
+
+            # 5. api_keys table
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS api_keys (
+                    key_id UUID PRIMARY KEY,
+                    account_id UUID NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
+                    name VARCHAR(255) NOT NULL,
+                    key_prefix VARCHAR(16) NOT NULL,
+                    key_hash VARCHAR(255) NOT NULL,
+                    scopes VARCHAR(1000) NOT NULL DEFAULT 'agent:run,workspace:read',
+                    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+                    expires_at TIMESTAMP WITH TIME ZONE,
+                    last_used_at TIMESTAMP WITH TIME ZONE,
+                    revoked_at TIMESTAMP WITH TIME ZONE
+                )
+            """))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_api_keys_account_id ON api_keys(account_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_api_keys_prefix ON api_keys(key_prefix)"))
+
+            # 6. organizations table
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS organizations (
+                    org_id UUID PRIMARY KEY,
+                    name VARCHAR(255) NOT NULL,
+                    slug VARCHAR(100) UNIQUE NOT NULL,
+                    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+                    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+                )
+            """))
+
+            # 7. organization_members table
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS organization_members (
+                    id UUID PRIMARY KEY,
+                    org_id UUID NOT NULL REFERENCES organizations(org_id) ON DELETE CASCADE,
+                    account_id UUID NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
+                    role VARCHAR(50) NOT NULL DEFAULT 'member',
+                    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+                    CONSTRAINT uq_org_member UNIQUE (org_id, account_id)
+                )
+            """))
+
+            # 8. projects table
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS projects (
+                    project_id UUID PRIMARY KEY,
+                    org_id UUID REFERENCES organizations(org_id) ON DELETE SET NULL,
+                    name VARCHAR(255) NOT NULL,
+                    slug VARCHAR(100) NOT NULL,
+                    execution_mode VARCHAR(50) NOT NULL DEFAULT 'review',
+                    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+                    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+                )
+            """))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_projects_slug ON projects(slug)"))
+
+            # 9. project_members table
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS project_members (
+                    id UUID PRIMARY KEY,
+                    project_id UUID NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
+                    account_id UUID NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
+                    role VARCHAR(50) NOT NULL DEFAULT 'editor',
+                    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+                    CONSTRAINT uq_project_member UNIQUE (project_id, account_id)
+                )
+            """))
+

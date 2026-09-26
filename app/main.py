@@ -203,6 +203,15 @@ async def lifespan(app: FastAPI):
             async with _engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
 
+        # Always run the idempotent Cloud Identity V2 schema bootstrapper
+        # This adds missing columns/tables even on production without full migration runs
+        try:
+            from app.services.cloud_identity_service import ensure_cloud_identity_schema
+            await ensure_cloud_identity_schema(_engine)
+            logger.info("Cloud Identity V2 schema verified/bootstrapped successfully")
+        except Exception as schema_exc:
+            logger.error("Cloud Identity V2 schema bootstrap failed: %s", schema_exc, exc_info=True)
+
         await _seed_v3_tables()
         await _seed_admin_accounts()
         await _clean_mock_skills()
