@@ -63,7 +63,7 @@ class Settings(BaseSettings):
     jwt_issuer: str = "talos-cloud"
     jwt_audience: str = "talos-web"
     token_expiry_minutes: int = 4320  # 3 days token expiry for device tokens
-    session_expiry_minutes: int = 15  # 15 minutes web session access token expiry
+    session_expiry_minutes: int = 10080  # 7 days web session access token expiry (prevents sudden logouts)
     refresh_token_expiry_days: int = 30  # 30 days web session refresh token expiry
     talos_env: str = "development"
     redis_url: str = "redis://localhost:6379/0"

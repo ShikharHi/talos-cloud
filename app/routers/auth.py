@@ -470,7 +470,7 @@ async def google_callback(
         value=session_token,
         httponly=True,
         samesite="lax",
-        max_age=900,
+        max_age=7 * 86400,
     )
     resp.set_cookie(
         key="talos_refresh_token",
@@ -652,7 +652,7 @@ async def refresh_web_session(
             value=access_token,
             httponly=True,
             samesite="lax",
-            max_age=900,
+            max_age=7 * 86400,
         )
         response.set_cookie(
             key="talos_refresh_token",
@@ -667,7 +667,7 @@ async def refresh_web_session(
             session_token=access_token,
             refresh_token=new_refresh_token,
             token_type="bearer",
-            expires_in=900,
+            expires_in=7 * 86400,
         )
     except InvalidSessionError as e:
         await db.commit()
