@@ -226,7 +226,7 @@ class RefreshResponse(BaseModel):
 
 
 class SessionRefreshRequest(BaseModel):
-    refresh_token: str
+    refresh_token: Optional[str] = None
 
 
 class SessionRefreshResponse(BaseModel):
