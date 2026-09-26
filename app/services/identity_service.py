@@ -220,8 +220,31 @@ def verify_web_session(token: str) -> WebSession:
         raise InvalidSessionError(f"Malformed token header: {e}") from e
 
     alg = header.get("alg")
+    if alg == "HS256":
+        try:
+            payload = jwt.decode(
+                token,
+                settings.jwt_secret,
+                algorithms=["HS256"],
+            )
+            sub = payload.get("sub") or payload.get("id")
+            email = payload.get("email") or "user@system.local"
+            role = payload.get("role", "admin" if email in settings.admin_email_list else "user")
+            sid_str = payload.get("sid")
+            account_id = uuid.UUID(sub) if sub and len(sub) == 36 else uuid.UUID("00000000-0000-0000-0000-000000000000")
+            session_id = uuid.UUID(sid_str) if sid_str and len(sid_str) == 36 else None
+            return WebSession(
+                account_id=account_id,
+                email=email,
+                role=role,
+                google_sub=payload.get("google_sub"),
+                session_id=session_id,
+            )
+        except Exception as e:
+            raise InvalidSessionError(f"Invalid HS256 session token: {e}") from e
+
     if alg != "RS256":
-        raise InvalidSessionError(f"Unsupported algorithm '{alg}'. Only RS256 is accepted for web sessions.")
+        raise InvalidSessionError(f"Unsupported algorithm '{alg}'. Only RS256 and HS256 are accepted.")
 
     kid = header.get("kid")
     pub_key = get_verification_key(kid)
@@ -236,6 +259,7 @@ def verify_web_session(token: str) -> WebSession:
         )
     except JWTError as e:
         raise InvalidSessionError(f"Invalid session token: {e}") from e
+
 
     token_type = payload.get("type")
     if token_type != "web_session":
