@@ -1,12 +1,8 @@
 """
-Talos Cloud — Native Google Gemini Adapter (Tasks 24 & 26).
+Talos Cloud — Google Gemini OpenAI-compatible adapter.
 
-Implements Google Gemini API (v1beta generateContent / streamGenerateContent):
-- Format conversion from OpenAI messages to Gemini contents (user, model, parts).
-- System instructions mapping (system_instruction).
-- Generation config (temperature, maxOutputTokens, thinkingConfig).
-- Usage extraction from Gemini usageMetadata (promptTokenCount, candidatesTokenCount, totalTokenCount).
-- Zero-downtime key rotation: primary key + secondary rollover key on 401.
+Uses Google's OpenAI-compatible Chat Completions endpoint so Talos can pass
+function tools and consume streamed tool-call deltas without format loss.
 """
 
 from __future__ import annotations
@@ -23,7 +19,7 @@ class GeminiAdapter:
         self,
         primary_key: str,
         secondary_key: Optional[str] = None,
-        base_url: str = "https://generativelanguage.googleapis.com/v1beta",
+        base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai",
     ) -> None:
         self.primary_key = primary_key
         self.secondary_key = secondary_key
@@ -35,60 +31,29 @@ class GeminiAdapter:
         payload: dict[str, Any],
         stream: bool = False,
     ) -> Tuple[str, dict[str, str], dict[str, Any]]:
-        """
-        Translates payload to Gemini generateContent / streamGenerateContent format.
-        """
-        action = "streamGenerateContent" if stream else "generateContent"
-        clean_model = model_id.removeprefix("models/")
-        url = f"{self.base_url}/models/{clean_model}:{action}?key={self.primary_key}"
-
+        """Build an OpenAI-compatible Gemini request, retaining tool schemas."""
+        url = f"{self.base_url}/chat/completions"
         headers = {
+            "Authorization": f"Bearer {self.primary_key}",
             "Content-Type": "application/json",
         }
-
-        incoming_messages = payload.get("messages", [])
-        contents: list[dict[str, Any]] = []
-        system_text: Optional[str] = None
-
-        for msg in incoming_messages:
-            role = msg.get("role", "user")
-            content = msg.get("content", "")
-
-            if role == "system":
-                system_text = content if isinstance(content, str) else str(content)
-            elif role == "user":
-                contents.append({"role": "user", "parts": [{"text": str(content)}]})
-            elif role in ("assistant", "model"):
-                contents.append({"role": "model", "parts": [{"text": str(content)}]})
-
-        body: dict[str, Any] = {
-            "contents": contents,
-        }
-
-        if system_text:
-            body["system_instruction"] = {
-                "parts": [{"text": system_text}]
-            }
-
-        gen_config: dict[str, Any] = {}
-        if "temperature" in payload:
-            gen_config["temperature"] = payload["temperature"]
-        if "max_tokens" in payload:
-            gen_config["maxOutputTokens"] = payload["max_tokens"]
-        if "max_completion_tokens" in payload:
-            gen_config["maxOutputTokens"] = payload["max_completion_tokens"]
-
-        if gen_config:
-            body["generationConfig"] = gen_config
-
+        body = dict(payload)
+        body["model"] = model_id.removeprefix("models/")
+        if stream:
+            body["stream"] = True
         return url, headers, body
 
     def get_rotated_url(self, model_id: str, stream: bool = False, use_secondary: bool = False) -> str:
-        """Returns API endpoint URL with secondary key if primary failed with 401."""
-        action = "streamGenerateContent" if stream else "generateContent"
-        clean_model = model_id.removeprefix("models/")
+        """Returns the OpenAI-compatible endpoint; retained for adapter API compatibility."""
+        return f"{self.base_url}/chat/completions"
+
+    def get_rotated_headers(self, use_secondary: bool = False) -> dict[str, str]:
+        """Returns headers using the secondary key after a 401 response."""
         key = self.secondary_key if (use_secondary and self.secondary_key) else self.primary_key
-        return f"{self.base_url}/models/{clean_model}:{action}?key={key}"
+        return {
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+        }
 
     @staticmethod
     def extract_gemini_usage(gemini_response: dict[str, Any]) -> dict[str, int]:

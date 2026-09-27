@@ -317,29 +317,40 @@ def test_anthropic_adapter_formatting():
 # ─── Task 25: Gemini Native Adapter ───────────────────────────────────────────
 
 def test_gemini_adapter_formatting():
-    """Gemini adapter translates messages to contents and system instructions."""
-    adapter = GeminiAdapter(primary_key="gemini-test-key", base_url="https://generativelanguage.googleapis.com/v1beta")
+    """Gemini adapter preserves OpenAI messages and tools for agent calls."""
+    adapter = GeminiAdapter(primary_key="gemini-test-key")
 
     openai_payload = {
         "messages": [
             {"role": "system", "content": "Act as a math tutor."},
             {"role": "user", "content": "2 + 2?"},
         ],
+        "tools": [{"type": "function", "function": {"name": "get_weather"}}],
+        "tool_choice": "auto",
         "temperature": 0.2,
     }
 
     url, headers, body = adapter.format_request(
-        model_id="gemini-2.0-flash",
+        model_id="gemini-3.5-flash-lite",
         payload=openai_payload,
-        stream=False,
+        stream=True,
     )
 
-    assert "generateContent" in url
-    assert "key=gemini-test-key" in url
-    assert "contents" in body
-    assert body["contents"][0]["role"] == "user"
-    assert body["contents"][0]["parts"][0]["text"] == "2 + 2?"
-    assert body["system_instruction"]["parts"][0]["text"] == "Act as a math tutor."
+    assert url == "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+    assert headers["Authorization"] == "Bearer gemini-test-key"
+    assert body["model"] == "gemini-3.5-flash-lite"
+    assert body["messages"] == openai_payload["messages"]
+    assert body["tools"] == openai_payload["tools"]
+    assert body["stream"] is True
+
+
+def test_explicit_model_ids_route_to_their_provider():
+    from app.services.relay_service import _requested_model_route
+
+    assert _requested_model_route("gemini-3.5-flash-lite") == ("gemini", "gemini-3.5-flash-lite")
+    assert _requested_model_route("glm-5-2") == ("zhipu", "glm-5-2")
+    assert _requested_model_route("codestral-2508") == ("mistral", "codestral-2508")
+    assert _requested_model_route(None) is None
 
 
 # ─── Task 26: Zero-Downtime Provider Secret Rotation ──────────────────────────

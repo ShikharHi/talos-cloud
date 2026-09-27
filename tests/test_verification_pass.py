@@ -378,7 +378,7 @@ async def test_live_path_adapter_dispatch_anthropic():
 
 @pytest.mark.asyncio
 async def test_live_path_adapter_dispatch_gemini():
-    """Verifies that RelayService._dispatch_llm uses GeminiAdapter on the live dispatch path."""
+    """Verifies that RelayService dispatches Gemini through its compatible endpoint."""
     from app.services.relay_service import RelayService
 
     service = RelayService(None)
@@ -389,25 +389,24 @@ async def test_live_path_adapter_dispatch_gemini():
     mock_resp = MagicMock()
     mock_resp.status_code = 200
     mock_resp.json.return_value = {
-        "candidates": [{
-            "content": {"parts": [{"text": "Hello from Gemini"}]}
-        }],
-        "usageMetadata": {"totalTokenCount": 35},
+        "choices": [{"message": {"role": "assistant", "content": "Hello from Gemini"}}],
+        "usage": {"total_tokens": 35},
     }
 
     with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
         mock_post.return_value = mock_resp
         user_res, raw_res = await service._dispatch_llm(
             provider="gemini",
-            model_id="gemini-2.0-flash",
-            payload={"messages": [{"role": "user", "content": "Hi"}]},
+            model_id="gemini-3.5-flash-lite",
+            payload={"messages": [{"role": "user", "content": "Hi"}], "tools": [{"type": "function"}]},
             settings=mock_settings,
         )
 
         assert user_res["choices"][0]["message"]["content"] == "Hello from Gemini"
-        assert raw_res["usageMetadata"]["totalTokenCount"] == 35
+        assert raw_res["usage"]["total_tokens"] == 35
         call_url = mock_post.call_args[0][0]
-        assert "generateContent" in call_url
+        assert call_url.endswith("/v1beta/openai/chat/completions")
+        assert mock_post.call_args.kwargs["json"]["tools"] == [{"type": "function"}]
 
 
 def test_transient_db_error_detection_for_serverless_neon():
