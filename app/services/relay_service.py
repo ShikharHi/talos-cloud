@@ -69,6 +69,24 @@ def _requested_model_route(model_id: str | None) -> tuple[str, str] | None:
     return None
 
 
+def _stream_provider_failure(
+    provider: str,
+    status_code: int,
+    credentials_missing: bool = False,
+) -> tuple[str, str]:
+    if credentials_missing:
+        provider_name = {"gemini": "Gemini", "mistral": "Mistral", "zhipu": "GLM"}.get(provider, "Selected provider")
+        return (
+            f"{provider_name} is not configured on the relay. Set its API key in the relay environment, restart the relay, and retry.",
+            "provider_not_configured",
+        )
+    if status_code == 429:
+        return "The model service is temporarily busy. Please try again in a moment.", "rate_limit_exceeded"
+    if status_code in (401, 403):
+        return "The model provider rejected its configured credentials or denied access. Check the relay key and model permissions.", "provider_auth_failed"
+    return "Model generation failed. Please try again.", "upstream_error"
+
+
 class RelayService:
     def __init__(self, db: AsyncSession):
         self.db = db
@@ -367,6 +385,7 @@ class RelayService:
         response = None
         active_client = None
         last_resp_code = 500
+        provider_credentials_missing = False
 
         for cand_provider, cand_model in candidates:
             provider = cand_provider
@@ -396,6 +415,10 @@ class RelayService:
                             continue
                         break
                 except Exception as e:
+                    if "API key not configured for provider" in str(e):
+                        provider_credentials_missing = True
+                        logger.error("Missing API key configured for provider '%s'", provider)
+                        break
                     logger.warning("Provider '%s' connection failed for stream: %s. Trying fallback candidate...", provider, e)
                     break
 
@@ -404,12 +427,11 @@ class RelayService:
 
         try:
             if response is None:
-                if last_resp_code == 429:
-                    clean_msg = "The model service is temporarily busy. Please try again in a moment."
-                    err_code = "rate_limit_exceeded"
-                else:
-                    clean_msg = "Model generation failed. Please try again."
-                    err_code = "upstream_error"
+                clean_msg, err_code = _stream_provider_failure(
+                    provider,
+                    last_resp_code,
+                    credentials_missing=provider_credentials_missing,
+                )
 
                 fail_evt = sm.transition_failed(clean_msg, code=err_code)
                 if fail_evt:
