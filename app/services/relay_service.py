@@ -55,6 +55,20 @@ from app.services.model_registry import ModelRegistry
 logger = logging.getLogger(__name__)
 
 
+def _requested_model_route(model_id: str | None) -> tuple[str, str] | None:
+    """Resolve explicit UI model selections without silently substituting providers."""
+    if not model_id:
+        return None
+    normalized = model_id.strip().lower()
+    if normalized.startswith("gemini-"):
+        return "gemini", model_id.strip()
+    if normalized.startswith("glm-"):
+        return "zhipu", model_id.strip()
+    if "mistral" in normalized or "codestral" in normalized:
+        return "mistral", model_id.strip()
+    return None
+
+
 class RelayService:
     def __init__(self, db: AsyncSession):
         self.db = db
@@ -121,8 +135,9 @@ class RelayService:
         # ── Step 2: Resolve Provider Routing & Dispatch ──────────────────────
         candidates: list[tuple[str, str]] = []
         req_model = payload.get("model")
-        if req_model and ("mistral" in req_model.lower() or "codestral" in req_model.lower()):
-            candidates.append(("mistral", req_model))
+        explicit_route = _requested_model_route(req_model)
+        if explicit_route:
+            candidates.append(explicit_route)
         else:
             try:
                 p_primary, m_primary = await self.resolve_provider_routing(capability_id)
@@ -130,9 +145,10 @@ class RelayService:
             except Exception:
                 pass
 
-        for p_fb, m_fb in DEFAULT_FALLBACK_CHAINS.get(capability_id, []):
-            if (p_fb, m_fb) not in candidates and self._has_credentials(p_fb):
-                candidates.append((p_fb, m_fb))
+        if not explicit_route:
+            for p_fb, m_fb in DEFAULT_FALLBACK_CHAINS.get(capability_id, []):
+                if (p_fb, m_fb) not in candidates and self._has_credentials(p_fb):
+                    candidates.append((p_fb, m_fb))
 
         if not candidates:
             candidates.append(("mistral", "codestral-2508"))
@@ -310,8 +326,9 @@ class RelayService:
 
         candidates: list[tuple[str, str]] = []
         req_model = payload.get("model")
-        if req_model and ("mistral" in req_model.lower() or "codestral" in req_model.lower()):
-            candidates.append(("mistral", req_model))
+        explicit_route = _requested_model_route(req_model)
+        if explicit_route:
+            candidates.append(explicit_route)
         else:
             try:
                 p_primary, m_primary = await self.resolve_provider_routing(capability_id)
@@ -319,9 +336,10 @@ class RelayService:
             except Exception:
                 pass
 
-        for p_fb, m_fb in DEFAULT_FALLBACK_CHAINS.get(capability_id, []):
-            if (p_fb, m_fb) not in candidates and self._has_credentials(p_fb):
-                candidates.append((p_fb, m_fb))
+        if not explicit_route:
+            for p_fb, m_fb in DEFAULT_FALLBACK_CHAINS.get(capability_id, []):
+                if (p_fb, m_fb) not in candidates and self._has_credentials(p_fb):
+                    candidates.append((p_fb, m_fb))
 
         if not candidates:
             candidates.append(("mistral", "codestral-2508"))
@@ -651,7 +669,7 @@ class RelayService:
         elif p == "openai":
             return self._normalize_key(settings.openai_api_key), self._normalize_key(settings.openai_api_key_previous) or None, "https://api.openai.com/v1"
         elif p == "gemini":
-            return self._normalize_key(settings.gemini_api_key), self._normalize_key(settings.gemini_api_key_previous) or None, "https://generativelanguage.googleapis.com/v1beta"
+            return self._normalize_key(settings.gemini_api_key), self._normalize_key(settings.gemini_api_key_previous) or None, "https://generativelanguage.googleapis.com/v1beta/openai"
         elif p == "groq":
             return self._normalize_key(settings.groq_api_key), self._normalize_key(settings.groq_api_key_previous) or None, "https://api.groq.com/openai/v1"
         elif p == "deepseek":
@@ -711,16 +729,11 @@ class RelayService:
                     resp = await client.post(url, headers=headers, json=body)
                     if resp.status_code == 401 and secondary_key:
                         logger.warning("Gemini primary key failed with 401; attempting secondary key rotation")
-                        url = adapter.get_rotated_url(model_id, stream=False, use_secondary=True)
+                        headers = adapter.get_rotated_headers(use_secondary=True)
                         resp = await client.post(url, headers=headers, json=body)
                     resp.raise_for_status()
                     data = resp.json()
-                candidates = data.get("candidates", [])
-                text_part = ""
-                if candidates:
-                    parts = candidates[0].get("content", {}).get("parts", [])
-                    text_part = "".join(part.get("text", "") for part in parts if "text" in part)
-                user_result = {"choices": [{"message": {"role": "assistant", "content": text_part}}]}
+                user_result = {"choices": data.get("choices", [])}
                 raw_response = data
 
             elif p == "openai":
