@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 from typing import Any, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.domain.marketplace.errors import (
     ListingNotFoundError,
     PublishNotAllowedError,
@@ -40,6 +41,7 @@ class UploadService:
         self.listing_repo = ListingRepository(db)
         self.version_repo = VersionRepository(db)
         self.storage = storage or TigrisMarketplaceStorage()
+        self.settings = get_settings()
 
     async def init_upload(
         self,
@@ -57,9 +59,9 @@ class UploadService:
         if listing.author_account_id != account.account_id and getattr(account, "role", "user") != "admin":
             raise PublishNotAllowedError(f"You are not authorized to publish new versions for '{listing.slug}'.")
 
-        # Invariant: Reject duplicate published versions
+        # Invariant: Reject duplicate published versions unless tombstoned
         existing_ver = await self.version_repo.get_by_listing_and_version(listing_id, version)
-        if existing_ver and existing_ver.status in ("published", "approved"):
+        if existing_ver and existing_ver.status in ("published", "approved") and listing.status != "tombstoned":
             raise VersionConflictError(
                 f"Version '{version}' for listing '{listing.slug}' is already published and immutable."
             )
