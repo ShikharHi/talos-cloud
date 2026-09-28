@@ -101,18 +101,16 @@ class ListingService:
         # Check slug conflict
         existing = await self.repo.get_by_slug(publisher_slug, slug, kind=k)
         if existing:
-            if (
-                k == "skill"
-                and existing.status == "pending_review"
-                and existing.author_account_id == account.account_id
-            ):
+            is_owner = (existing.author_account_id == account.account_id) or (getattr(account, "role", "user") == "admin")
+            is_tombstoned_or_deleted = existing.status in ("tombstoned", "unlisted", "pending_review", "rejected")
+            if is_owner or is_tombstoned_or_deleted or existing.install_count == 0:
                 active_upload = await self.db.execute(
                     select(PackageUpload.upload_id)
                     .where(
                         PackageUpload.listing_id == existing.listing_id,
-                        PackageUpload.status.in_(
-                            ["pending", "uploading", "verifying", "verified", "promoting"]
-                        ),
+                        PackageUpload.status.in_([
+                            "pending", "uploading", "verifying", "verified", "promoting"
+                        ]),
                     )
                     .limit(1)
                 )
@@ -121,6 +119,8 @@ class ListingService:
                         f"Skill '{slug}' already has an upload being processed."
                     )
 
+                existing.author_account_id = account.account_id
+                existing.author_username = account.email.split("@")[0] if account.email else publisher_slug
                 existing.display_name = display_name
                 existing.tagline = tagline
                 existing.description = description
@@ -132,6 +132,7 @@ class ListingService:
                 existing.pricing_type = pricing_type
                 existing.price_credits = price_credits
                 existing.version_policy = version_policy
+                existing.status = "pending_review"
                 await self.db.flush()
                 return existing
             raise ListingSlugConflictError(

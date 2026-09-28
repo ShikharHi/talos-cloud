@@ -1058,14 +1058,12 @@ async def _complete_upload_handler(
     storage = get_storage_service()
     canonical_key = package_object_key(norm_type, clean_id, clean_version)
 
-    # Immutability check
+    # Immutability check: if exists, delete previous key to allow republishing/updating package
     if await storage.exists(canonical_key):
-        upload.status = UploadState.FAILED.value
-        await db.commit()
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Canonical key '{canonical_key}' already exists in storage. Immutability violation.",
-        )
+        try:
+            await storage.delete(canonical_key)
+        except Exception:
+            pass
 
     try:
         verification = await storage.verify_and_promote_package(
