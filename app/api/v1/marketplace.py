@@ -6,8 +6,11 @@ Prefix: /api/v1/marketplace
 
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Any, List, Optional
+
+logger = logging.getLogger(__name__)
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
