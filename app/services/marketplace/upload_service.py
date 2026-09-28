@@ -145,23 +145,25 @@ class UploadService:
 
         if async_verification:
             dispatched = False
-            try:
-                import inngest
-                from app.inngest.client import inngest_client
-                from app.inngest.events import TalosEvents
+            # Check if Inngest background event pipeline is active with reachable worker
+            if not self.settings.inngest_dev and self.settings.inngest_event_key:
+                try:
+                    import inngest
+                    from app.inngest.client import inngest_client
+                    from app.inngest.events import TalosEvents
 
-                await inngest_client.send(
-                    inngest.Event(
-                        name=TalosEvents.MARKETPLACE_PACKAGE_UPLOADED,
-                        data={
-                            "upload_id": str(upload_id),
-                            "account_id": str(account.account_id),
-                        },
+                    await inngest_client.send(
+                        inngest.Event(
+                            name=TalosEvents.MARKETPLACE_PACKAGE_UPLOADED,
+                            data={
+                                "upload_id": str(upload_id),
+                                "account_id": str(account.account_id),
+                            },
+                        )
                     )
-                )
-                dispatched = True
-            except Exception as e:
-                logger.debug("Inngest dispatch not available (%s), trying Celery...", e)
+                    dispatched = True
+                except Exception as e:
+                    logger.debug("Inngest dispatch not available (%s), trying Celery...", e)
 
             if not dispatched:
                 try:
@@ -169,12 +171,12 @@ class UploadService:
                     verify_and_promote_package_task.delay(str(upload_id))
                     dispatched = True
                 except Exception as e:
-                    logger.debug("Celery delay not available (%s), falling back to synchronous execution.", e)
+                    logger.debug("Celery delay not available (%s), executing inline to ensure Tigris storage promotion.", e)
 
             if dispatched:
                 return {"status": "verifying", "upload_id": str(upload_id), "async": True}
 
-            # Fallback to direct inline execution if neither background worker is active
+            # Immediate promotion to Tigris object storage and published version table
             from app.celery_app.tasks.marketplace import async_verify_and_promote
             return await async_verify_and_promote(str(upload_id), db=self.db, storage=self.storage)
         else:
