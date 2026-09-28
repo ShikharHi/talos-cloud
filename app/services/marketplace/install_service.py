@@ -57,6 +57,21 @@ class InstallService:
         if not listing:
             raise ListingNotFoundError("Marketplace listing not found.")
 
+        # If item is paid, verify that account has an active entitlement (unless author or admin)
+        if getattr(listing, "pricing_type", "free") == "paid" and listing.author_account_id != account.account_id and getattr(account, "role", "user") != "admin":
+            from app.models.marketplace import MarketplaceEntitlement
+            from sqlalchemy import select
+            ent_stmt = select(MarketplaceEntitlement).where(
+                MarketplaceEntitlement.account_id == account.account_id,
+                MarketplaceEntitlement.listing_id == listing.listing_id,
+                MarketplaceEntitlement.status == "active",
+            )
+            ent_res = await self.db.execute(ent_stmt)
+            if not ent_res.scalar_one_or_none():
+                raise InstallNotAuthorizedError(
+                    f"Listing '{listing.display_name}' requires purchase ({listing.price_credits} Talos Credits) before installation."
+                )
+
         # 2. Resolve exact version (never leave as 'latest')
         version_record = None
         if requested_version and requested_version.lower() != "latest":

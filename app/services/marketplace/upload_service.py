@@ -4,8 +4,11 @@ Talos Cloud — Marketplace Upload Service.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timedelta, timezone
+
+logger = logging.getLogger(__name__)
 from typing import Any, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -141,6 +144,7 @@ class UploadService:
         await self.db.flush()
 
         if async_verification:
+            dispatched = False
             try:
                 import inngest
                 from app.inngest.client import inngest_client
@@ -155,13 +159,24 @@ class UploadService:
                         },
                     )
                 )
-                return {"status": "verifying", "upload_id": str(upload_id), "async": True}
+                dispatched = True
             except Exception as e:
-                logger.warning(
-                    "Inngest dispatch failed (%s). Executing async_verify_and_promote directly.", e
-                )
-                from app.celery_app.tasks.marketplace import async_verify_and_promote
-                return await async_verify_and_promote(str(upload_id), db=self.db, storage=self.storage)
+                logger.debug("Inngest dispatch not available (%s), trying Celery...", e)
+
+            if not dispatched:
+                try:
+                    from app.celery_app.tasks.marketplace import verify_and_promote_package_task
+                    verify_and_promote_package_task.delay(str(upload_id))
+                    dispatched = True
+                except Exception as e:
+                    logger.debug("Celery delay not available (%s), falling back to synchronous execution.", e)
+
+            if dispatched:
+                return {"status": "verifying", "upload_id": str(upload_id), "async": True}
+
+            # Fallback to direct inline execution if neither background worker is active
+            from app.celery_app.tasks.marketplace import async_verify_and_promote
+            return await async_verify_and_promote(str(upload_id), db=self.db, storage=self.storage)
         else:
             from app.celery_app.tasks.marketplace import async_verify_and_promote
             return await async_verify_and_promote(str(upload_id), db=self.db, storage=self.storage)

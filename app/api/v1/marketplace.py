@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import uuid
 from typing import Any, List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -64,6 +64,9 @@ class ListingCreateRequest(BaseModel):
     tags: List[str] = Field(default_factory=list)
     manifest_yaml: str = Field(default="")
     visibility: str = Field(default="public")
+    pricing_type: str = Field(default="free", description="free | paid")
+    price_credits: int = Field(default=0, ge=0)
+    version_policy: str = Field(default="all_minor_patch")
 
 
 class ListingResponse(BaseModel):
@@ -71,6 +74,7 @@ class ListingResponse(BaseModel):
 
     listing_id: uuid.UUID
     publisher_slug: str
+    author_username: str
     slug: str
     full_slug: str
     kind: str
@@ -84,6 +88,11 @@ class ListingResponse(BaseModel):
     visibility: str
     version: str
     install_count: int
+    download_count: int = 0
+    purchase_count: int = 0
+    pricing_type: str = "free"
+    price_credits: int = 0
+    verified: bool = False
     is_builtin: bool
     created_at: Any
     updated_at: Any
@@ -159,7 +168,8 @@ async def search_listings(
     page_size: int = Query(50, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
 ):
-    status_str = status if isinstance(status, str) else "approved"
+    # Public marketplace search must never expose drafts or unverified uploads.
+    status_str = "approved"
     service = ListingService(db)
     items, _ = await service.search(
         q=q, kind=kind, tag=tag, publisher=publisher, status=status_str, page=page, page_size=page_size
@@ -171,7 +181,10 @@ async def search_listings(
 async def get_listing(listing_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     service = ListingService(db)
     try:
-        return await service.get_by_id(listing_id)
+        listing = await service.get_by_id(listing_id)
+        if listing.status != "approved":
+            raise HTTPException(status_code=404, detail="Marketplace listing not found.")
+        return listing
     except MarketplaceError as e:
         raise HTTPException(status_code=404, detail=e.message)
 
@@ -197,6 +210,9 @@ async def create_listing(
             tags=payload.tags,
             manifest_yaml=payload.manifest_yaml,
             visibility=payload.visibility,
+            pricing_type=payload.pricing_type,
+            price_credits=payload.price_credits,
+            version_policy=payload.version_policy,
         )
     except MarketplaceError as e:
         raise HTTPException(status_code=400, detail=e.message)
@@ -235,6 +251,76 @@ async def init_upload(
         )
     except MarketplaceError as e:
         raise HTTPException(status_code=400, detail=e.message)
+
+
+@router.post("/uploads/file")
+async def upload_package_file(
+    response: Response,
+    listing_id: uuid.UUID = Form(...),
+    version: str = Form(...),
+    file: UploadFile = File(...),
+    async_verification: bool = Form(True),
+    account: Account = Depends(require_account),
+    db: AsyncSession = Depends(get_db),
+):
+    """Streams an authenticated package upload through Cloud into Tigris staging."""
+    import hashlib
+
+    from app.config import get_settings
+    from app.domain.marketplace.upload import UploadStatus
+    from app.models.marketplace import PackageUpload
+    from app.services.marketplace.upload_service import UploadService
+
+    extension = (file.filename or "").lower().rsplit(".", 1)[-1]
+    if extension not in ("zip", "skill"):
+        raise HTTPException(status_code=400, detail="Upload a .zip or .skill archive.")
+
+    max_size = get_settings().storage_max_package_size_bytes
+    hasher = hashlib.sha256()
+    file_size = 0
+    while chunk := await file.read(1024 * 1024):
+        file_size += len(chunk)
+        if file_size > max_size:
+            raise HTTPException(status_code=413, detail=f"Package exceeds the {max_size}-byte upload limit.")
+        hasher.update(chunk)
+    if file_size == 0:
+        raise HTTPException(status_code=400, detail="Uploaded package is empty.")
+    await file.seek(0)
+
+    service = UploadService(db)
+    try:
+        initialized = await service.init_upload(
+            account=account,
+            listing_id=listing_id,
+            version=version,
+            file_size=file_size,
+            sha256=hasher.hexdigest(),
+        )
+    except MarketplaceError as e:
+        raise HTTPException(status_code=400, detail=e.message)
+
+    upload_id = uuid.UUID(initialized["upload_id"])
+    try:
+        await service.storage.upload_stream(
+            initialized["staging_key"], file.file, content_type="application/zip"
+        )
+        result = await service.complete_upload(
+            account=account,
+            upload_id=upload_id,
+            async_verification=async_verification,
+        )
+    except Exception as exc:
+        upload = await service.upload_repo.get_by_id(upload_id)
+        if upload and upload.status in (UploadStatus.PENDING.value, UploadStatus.UPLOADING.value):
+            upload.status = UploadStatus.FAILED.value
+            upload.failure_reason = "Cloud storage upload failed."
+            await db.flush()
+        logger.exception("Could not store marketplace upload %s", upload_id)
+        raise HTTPException(status_code=502, detail="Could not store the package in Cloud storage.") from exc
+
+    if result.get("status") == "verifying":
+        response.status_code = status.HTTP_202_ACCEPTED
+    return result
 
 
 @router.post("/uploads/complete")
@@ -532,3 +618,200 @@ async def compat_install_listing(
         }
     except MarketplaceError as e:
         raise HTTPException(status_code=400, detail=e.message)
+
+
+# ── Economy & Creator Routes ───────────────────────────────────────────────
+
+class PurchaseRequest(BaseModel):
+    listing_id: uuid.UUID
+    idempotency_key: Optional[str] = None
+
+
+@router.post("/items/{listing_id}/purchase")
+@router.post("/purchase")
+async def purchase_listing(
+    payload: Optional[PurchaseRequest] = None,
+    listing_id: Optional[uuid.UUID] = None,
+    account: Account = Depends(require_account),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.services.marketplace.purchase_service import PurchaseService
+    target_id = listing_id or (payload.listing_id if payload else None)
+    if not target_id:
+        raise HTTPException(status_code=400, detail="listing_id is required.")
+
+    service = PurchaseService(db)
+    try:
+        return await service.purchase_listing(
+            buyer=account,
+            listing_id=target_id,
+            idempotency_key=payload.idempotency_key if payload else None,
+        )
+    except MarketplaceError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/entitlements")
+async def list_user_entitlements(
+    account: Account = Depends(require_account),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.services.marketplace.purchase_service import PurchaseService
+    service = PurchaseService(db)
+    items = await service.list_entitlements(account.account_id)
+    return [
+        {
+            "entitlement_id": str(e.entitlement_id),
+            "listing_id": str(e.listing_id),
+            "slug": e.listing.slug if e.listing else "",
+            "display_name": e.listing.display_name if e.listing else "",
+            "kind": e.listing.kind if e.listing else "",
+            "purchase_id": e.purchase_id,
+            "price_paid_credits": e.price_paid_credits,
+            "status": e.status,
+            "acquired_at": e.acquired_at.isoformat() if e.acquired_at else None,
+        }
+        for e in items
+    ]
+
+
+@router.get("/creators/{publisher_slug}")
+async def get_creator_public_profile(
+    publisher_slug: str,
+    db: AsyncSession = Depends(get_db),
+):
+    from sqlalchemy import func, select
+    from app.models.marketplace import MarketplaceListing, CreatorEarning
+    clean_pub = publisher_slug.lower().strip()
+
+    # Find author account
+    acc_stmt = select(Account).where(
+        (func.lower(Account.publisher_slug) == clean_pub) |
+        (func.lower(Account.email).like(f"{clean_pub}@%"))
+    )
+    acc_res = await db.execute(acc_stmt)
+    author = acc_res.scalar_one_or_none()
+
+    # Aggregate public publisher stats
+    stats_stmt = select(
+        func.count(MarketplaceListing.listing_id).label("published_items"),
+        func.coalesce(func.sum(MarketplaceListing.install_count), 0).label("total_installs"),
+        func.coalesce(func.sum(MarketplaceListing.download_count), 0).label("total_downloads"),
+        func.coalesce(func.sum(MarketplaceListing.purchase_count), 0).label("total_purchases"),
+    ).where(
+        func.lower(MarketplaceListing.publisher_slug) == clean_pub,
+        MarketplaceListing.status == "approved",
+    )
+    stats_res = await db.execute(stats_stmt)
+    stats_row = stats_res.first()
+
+    # Fetch published items
+    items_stmt = select(MarketplaceListing).where(
+        func.lower(MarketplaceListing.publisher_slug) == clean_pub,
+        MarketplaceListing.status == "approved",
+    ).order_by(MarketplaceListing.install_count.desc())
+    items_res = await db.execute(items_stmt)
+    items = items_res.scalars().all()
+
+    return {
+        "publisher_slug": clean_pub,
+        "display_name": author.display_name if author else clean_pub,
+        "avatar_url": author.avatar_url if author else None,
+        "bio": author.bio if author else "",
+        "verified_publisher": getattr(author, "verified_publisher", False) if author else False,
+        "stats": {
+            "published_items": stats_row.published_items if stats_row else 0,
+            "total_installs": stats_row.total_installs if stats_row else 0,
+            "total_downloads": stats_row.total_downloads if stats_row else 0,
+            "total_purchases": stats_row.total_purchases if stats_row else 0,
+        },
+        "items": [
+            {
+                "listing_id": str(i.listing_id),
+                "slug": i.slug,
+                "display_name": i.display_name,
+                "kind": i.kind,
+                "tagline": i.tagline,
+                "pricing_type": i.pricing_type,
+                "price_credits": i.price_credits,
+                "version": i.version,
+                "install_count": i.install_count,
+            }
+            for i in items
+        ]
+    }
+
+
+@router.get("/creator/dashboard")
+async def get_creator_dashboard(
+    account: Account = Depends(require_account),
+    db: AsyncSession = Depends(get_db),
+):
+    from sqlalchemy import func, select
+    from app.models.marketplace import CreatorEarning, MarketplaceListing
+
+    # 1. Total creator earnings breakdown (Credits only, no real money)
+    earn_stmt = select(
+        func.coalesce(func.sum(CreatorEarning.creator_share_credits), 0).label("total_earned"),
+        func.coalesce(
+            func.sum(CreatorEarning.creator_share_credits).filter(CreatorEarning.status == "available"), 0
+        ).label("available_earnings"),
+        func.coalesce(
+            func.sum(CreatorEarning.creator_share_credits).filter(CreatorEarning.status == "pending"), 0
+        ).label("pending_earnings"),
+    ).where(CreatorEarning.creator_id == account.account_id)
+    earn_res = await db.execute(earn_stmt)
+    earn_row = earn_res.first()
+
+    # 2. Creator listings performance
+    list_stmt = select(MarketplaceListing).where(
+        MarketplaceListing.author_account_id == account.account_id
+    ).order_by(MarketplaceListing.created_at.desc())
+    list_res = await db.execute(list_stmt)
+    listings = list_res.scalars().all()
+
+    # 3. Recent earning transactions
+    tx_stmt = select(CreatorEarning).where(
+        CreatorEarning.creator_id == account.account_id
+    ).order_by(CreatorEarning.created_at.desc()).limit(20)
+    tx_res = await db.execute(tx_stmt)
+    transactions = tx_res.scalars().all()
+
+    return {
+        "overview": {
+            "published_items": len(listings),
+            "total_credits_earned": earn_row.total_earned if earn_row else 0,
+            "available_earnings": earn_row.available_earnings if earn_row else 0,
+            "pending_earnings": earn_row.pending_earnings if earn_row else 0,
+            "currency": "Talos Credits",
+            "payouts_status": "real_money_disabled_development_mode",
+        },
+        "items": [
+            {
+                "listing_id": str(l.listing_id),
+                "slug": l.slug,
+                "display_name": l.display_name,
+                "kind": l.kind,
+                "pricing_type": l.pricing_type,
+                "price_credits": l.price_credits,
+                "install_count": l.install_count,
+                "download_count": l.download_count,
+                "purchase_count": l.purchase_count,
+                "status": l.status,
+            }
+            for l in listings
+        ],
+        "recent_earnings": [
+            {
+                "earning_id": str(t.earning_id),
+                "listing_id": str(t.listing_id),
+                "gross_credits": t.gross_credits,
+                "creator_share_credits": t.creator_share_credits,
+                "platform_share_credits": t.platform_share_credits,
+                "status": t.status,
+                "created_at": t.created_at.isoformat() if t.created_at else None,
+            }
+            for t in transactions
+        ],
+    }
+

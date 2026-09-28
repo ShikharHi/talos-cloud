@@ -74,6 +74,10 @@ class TigrisMarketplaceStorage:
         """Streams an object from storage to a local file pointer."""
         return await self._storage.download_stream_to_file(key, target_file)
 
+    async def upload_stream(self, key: str, source_file: BinaryIO, content_type: str) -> None:
+        """Streams an uploaded package into its staging object."""
+        await self._storage.upload_stream(key, source_file, content_type=content_type)
+
     async def promote_staging_to_canonical(
         self,
         staging_key: str,

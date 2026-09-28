@@ -226,11 +226,15 @@ class WalletEngine:
         self,
         reservation_id: uuid.UUID,
         actual_amount: int,
+        txn_type: TransactionType = TransactionType.relay_spend,
+        action_type: str = "relay_spend",
+        reference_id: str | None = None,
+        note: str | None = None,
     ) -> None:
         """
         Settles actual usage against a HELD reservation.
         Deducts actual spend from settled balances, releases the hold,
-        and records a signed relay_spend transaction in the append-only ledger.
+        and records a signed transaction in the append-only ledger.
         """
         self.db.expire_all()
         result = await self.db.execute(
@@ -270,16 +274,18 @@ class WalletEngine:
         # Record in append-only signed ledger
         account_id = wallet.account_id
         if actual_amount > 0:
+            default_note = f"{action_type} {actual_amount} credits (reserved={reservation.amount_reserved})"
             await self._write_credit_transaction(
                 account_id=account_id,
                 wallet_id=wallet.wallet_id,
                 task_id=reservation.task_id,
-                txn_type=TransactionType.relay_spend,
-                action_type="relay_spend",
+                txn_type=txn_type,
+                action_type=action_type,
                 amount=-actual_amount,
                 balance_after_monthly=wallet.monthly_balance,
                 balance_after_topup=wallet.topup_balance,
-                note=f"relay spend {actual_amount} credits (reserved={reservation.amount_reserved})",
+                reference_id=reference_id,
+                note=note or default_note,
             )
 
         reservation.status = ReservationStatus.COMMITTED
@@ -340,6 +346,32 @@ class WalletEngine:
             balance_after_topup=wallet.topup_balance,
             reference_id=purchase_ref,
             note=f"topup {amount} credits (ref={purchase_ref})",
+        )
+        await self.db.flush()
+
+    async def refund_credits(
+        self,
+        account_id: uuid.UUID,
+        amount: int,
+        reference_id: str,
+        note: str | None = None,
+    ) -> None:
+        """Returns credits to buyer's topup balance as a compensating ledger entry."""
+        wallet = await self.get_wallet(account_id)
+        wallet.topup_balance += amount
+        wallet.version += 1
+
+        await self._write_credit_transaction(
+            account_id=account_id,
+            wallet_id=wallet.wallet_id,
+            task_id=None,
+            txn_type=TransactionType.marketplace_refund,
+            action_type="marketplace_refund",
+            amount=amount,
+            balance_after_monthly=wallet.monthly_balance,
+            balance_after_topup=wallet.topup_balance,
+            reference_id=reference_id,
+            note=note or f"marketplace refund {amount} credits (ref={reference_id})",
         )
         await self.db.flush()
 

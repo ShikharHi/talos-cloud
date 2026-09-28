@@ -54,6 +54,19 @@ Instructions go here.
     assert report.sha256 != ""
 
 
+@pytest.mark.parametrize(
+    "skill_md",
+    [
+        "---\nname: missing-description\n---\n\n# Instructions\nDo the work.\n",
+        "---\nname: missing-instructions\ndescription: A useful skill\n---\n",
+    ],
+)
+def test_skill_scan_requires_description_and_instructions(skill_md):
+    stream = _make_zip({"SKILL.md": skill_md})
+    with pytest.raises(Exception, match="Invalid Skill manifest"):
+        PackageScanner.scan_archive_stream(stream, kind="skill")
+
+
 def test_valid_agent_scan():
     valid_agent_yaml = """
 name: my-agent

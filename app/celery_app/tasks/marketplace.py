@@ -129,6 +129,12 @@ async def async_verify_and_promote(
             await session.commit()
             return {"status": "failed", "reason": str(exc)}
 
+        if report.has_critical_findings:
+            upload.status = UploadStatus.FAILED.value
+            upload.failure_reason = "Security scan reported critical findings."
+            await session.commit()
+            return {"status": "failed", "reason": upload.failure_reason}
+
         upload.status = UploadStatus.VERIFIED.value
         upload.verified_at = datetime.now(timezone.utc)
         await session.commit()
@@ -197,6 +203,33 @@ async def async_verify_and_promote(
             await storage_client.delete(staging_key)
         except Exception as e:
             logger.warning("Could not delete staging object %s: %s", staging_key, e)
+
+        # 8. Idempotently synchronize search index in Weaviate Cloud
+        try:
+            from app.services.marketplace.search_service import WeaviateSearchService
+            weaviate_svc = WeaviateSearchService()
+            if weaviate_svc.is_configured:
+                search_doc = {
+                    "item_id": str(listing.listing_id),
+                    "name": listing.display_name,
+                    "slug": listing.slug,
+                    "publisher": listing.publisher_slug,
+                    "kind": listing.kind,
+                    "tagline": listing.tagline or "",
+                    "description": listing.description or "",
+                    "searchable_text": f"{listing.display_name} {listing.tagline} {listing.description} {' '.join(listing.tags or [])}",
+                    "tags": listing.tags or [],
+                    "capabilities": report.manifest_data.get("capabilities", []) if report.manifest_data else [],
+                    "auth_types": [report.manifest_data.get("auth", {}).get("type", "none")] if report.manifest_data else [],
+                    "verified": getattr(listing, "verified", False),
+                    "pricing_type": getattr(listing, "pricing_type", "free"),
+                    "price_credits": getattr(listing, "price_credits", 0),
+                    "install_count": listing.install_count,
+                    "status": listing.status,
+                }
+                await weaviate_svc.index_item(search_doc)
+        except Exception as e:
+            logger.warning("Weaviate search indexing after promotion failed non-blockingly: %s", e)
 
         logger.info("Upload %s successfully verified and promoted to %s", upload_id_str, canonical_key)
         return {"status": "promoted", "upload_id": upload_id_str, "canonical_key": canonical_key}

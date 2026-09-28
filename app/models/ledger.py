@@ -49,6 +49,8 @@ class TransactionType(str, enum.Enum):
     subscription_expiry = "subscription_expiry"  # unused sub credits expire at cycle end
     relay_spend = "relay_spend"             # committed relay usage
     manual_adjustment = "manual_adjustment" # admin adjustment
+    marketplace_purchase = "marketplace_purchase" # purchase listing with Talos credits
+    marketplace_refund = "marketplace_refund"     # refund credits to user for marketplace item
 
 
 class CreditTransaction(Base):

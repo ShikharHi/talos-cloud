@@ -457,6 +457,56 @@ async def ensure_cloud_identity_schema(engine) -> None:
         if dialect_name == "postgresql":
             await conn.execute(text("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS display_name VARCHAR(255)"))
             await conn.execute(text("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS avatar_url VARCHAR(500)"))
+            await conn.execute(text("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS publisher_slug VARCHAR(100)"))
+            await conn.execute(text("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS bio TEXT"))
+            await conn.execute(text("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS verified_publisher BOOLEAN NOT NULL DEFAULT FALSE"))
+            await conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_accounts_publisher_slug ON accounts(publisher_slug) WHERE publisher_slug IS NOT NULL"))
+
+            # Marketplace listings economy columns
+            await conn.execute(text("ALTER TABLE marketplace_listings ADD COLUMN IF NOT EXISTS pricing_type VARCHAR(20) NOT NULL DEFAULT 'free'"))
+            await conn.execute(text("ALTER TABLE marketplace_listings ADD COLUMN IF NOT EXISTS price_credits INTEGER NOT NULL DEFAULT 0"))
+            await conn.execute(text("ALTER TABLE marketplace_listings ADD COLUMN IF NOT EXISTS version_policy VARCHAR(50) NOT NULL DEFAULT 'all_minor_patch'"))
+            await conn.execute(text("ALTER TABLE marketplace_listings ADD COLUMN IF NOT EXISTS verified BOOLEAN NOT NULL DEFAULT FALSE"))
+            await conn.execute(text("ALTER TABLE marketplace_listings ADD COLUMN IF NOT EXISTS download_count INTEGER NOT NULL DEFAULT 0"))
+            await conn.execute(text("ALTER TABLE marketplace_listings ADD COLUMN IF NOT EXISTS purchase_count INTEGER NOT NULL DEFAULT 0"))
+
+            # Marketplace entitlements table
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS marketplace_entitlements (
+                    entitlement_id UUID PRIMARY KEY,
+                    account_id UUID NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
+                    listing_id UUID NOT NULL REFERENCES marketplace_listings(listing_id) ON DELETE CASCADE,
+                    purchase_id VARCHAR(128) UNIQUE NOT NULL,
+                    price_paid_credits INTEGER NOT NULL DEFAULT 0,
+                    version_policy VARCHAR(50) NOT NULL DEFAULT 'all_minor_patch',
+                    status VARCHAR(20) NOT NULL DEFAULT 'active',
+                    acquired_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+                    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+                    CONSTRAINT uq_account_listing_entitlement UNIQUE (account_id, listing_id)
+                )
+            """))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_marketplace_entitlements_account ON marketplace_entitlements(account_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_marketplace_entitlements_listing ON marketplace_entitlements(listing_id)"))
+
+            # Creator earnings ledger table
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS creator_earnings (
+                    earning_id UUID PRIMARY KEY,
+                    creator_id UUID NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
+                    listing_id UUID NOT NULL REFERENCES marketplace_listings(listing_id) ON DELETE CASCADE,
+                    version_id UUID REFERENCES marketplace_package_versions(version_id) ON DELETE SET NULL,
+                    purchase_id VARCHAR(128) NOT NULL,
+                    gross_credits INTEGER NOT NULL,
+                    platform_share_credits INTEGER NOT NULL,
+                    creator_share_credits INTEGER NOT NULL,
+                    status VARCHAR(20) NOT NULL DEFAULT 'available',
+                    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+                    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+                )
+            """))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_creator_earnings_creator ON creator_earnings(creator_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_creator_earnings_listing ON creator_earnings(listing_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_creator_earnings_purchase ON creator_earnings(purchase_id)"))
 
             # 2. identities table
             await conn.execute(text("""

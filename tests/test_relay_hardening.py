@@ -345,12 +345,17 @@ def test_gemini_adapter_formatting():
 
 
 def test_explicit_model_ids_route_to_their_provider():
-    from app.services.relay_service import _requested_model_route
+    from app.services.relay_service import _requested_model_route, _stream_provider_failure
 
+    assert _requested_model_route("gemini-3.8-flash") == ("gemini", "gemini-3.8-flash")
     assert _requested_model_route("gemini-3.5-flash-lite") == ("gemini", "gemini-3.5-flash-lite")
     assert _requested_model_route("glm-5-2") == ("zhipu", "glm-5-2")
     assert _requested_model_route("codestral-2508") == ("mistral", "codestral-2508")
     assert _requested_model_route(None) is None
+    assert _stream_provider_failure("gemini", 500, credentials_missing=True) == (
+        "Gemini is not configured on the relay. Set its API key in the relay environment, restart the relay, and retry.",
+        "provider_not_configured",
+    )
 
 
 # ─── Task 26: Zero-Downtime Provider Secret Rotation ──────────────────────────

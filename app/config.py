@@ -24,11 +24,11 @@ class Settings(BaseSettings):
     @classmethod
     def resolve_storage_fallbacks(cls, data: Any) -> Any:
         if isinstance(data, dict):
-            if not data.get("tigris_access_key_id") and not data.get("TIGRIS_ACCESS_KEY_ID"):
+            if "tigris_access_key_id" not in data and "TIGRIS_ACCESS_KEY_ID" not in data:
                 aws_key = data.get("aws_access_key_id") or data.get("AWS_ACCESS_KEY_ID") or os.environ.get("AWS_ACCESS_KEY_ID") or os.environ.get("TIGRIS_ACCESS_KEY_ID")
                 if aws_key:
                     data["tigris_access_key_id"] = aws_key
-            if not data.get("tigris_secret_access_key") and not data.get("TIGRIS_SECRET_ACCESS_KEY"):
+            if "tigris_secret_access_key" not in data and "TIGRIS_SECRET_ACCESS_KEY" not in data:
                 aws_secret = data.get("aws_secret_access_key") or data.get("AWS_SECRET_ACCESS_KEY") or os.environ.get("AWS_SECRET_ACCESS_KEY") or os.environ.get("TIGRIS_SECRET_ACCESS_KEY")
                 if aws_secret:
                     data["tigris_secret_access_key"] = aws_secret
@@ -129,6 +129,16 @@ class Settings(BaseSettings):
     storage_presigned_expiry_seconds: int = 900
     storage_max_package_size_bytes: int = 52_428_800  # 50 MB
     storage_max_asset_size_bytes: int = 2_097_152     # 2 MB
+
+    # Marketplace Economy Configuration (50/50 Revenue Model)
+    marketplace_economy_mode: str = "development"  # development | production
+    creator_share_bps: int = 5000                   # 50.00%
+    platform_share_bps: int = 5000                  # 50.00%
+
+    # Weaviate Cloud Search Configuration
+    weaviate_url: str | None = None
+    weaviate_api_key: str | None = None
+    weaviate_class_name: str = "MarketplaceItem"
 
     @property
     def is_storage_configured(self) -> bool:

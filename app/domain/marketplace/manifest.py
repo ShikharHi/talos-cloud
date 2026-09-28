@@ -34,13 +34,22 @@ class BaseManifest(BaseModel):
 
 class SkillManifest(BaseManifest):
     """Manifest for Skills (SKILL.md frontmatter or skill.yaml) following OpenClaw/ClawHub standard."""
+    description: str = Field(..., min_length=1, max_length=1000)
     kind: str = "skill"
     slug: Optional[str] = None
-    instructions: Optional[str] = None
+    instructions: str = Field(..., min_length=1)
     capabilities: List[str] = Field(default_factory=list)
     metadata: Optional[dict[str, Any]] = None
     requires_bins: List[str] = Field(default_factory=list)
     requires_env: List[str] = Field(default_factory=list)
+
+    @field_validator("description", "instructions")
+    @classmethod
+    def validate_required_text(cls, value: str) -> str:
+        clean = value.strip()
+        if not clean:
+            raise ValueError("must not be empty")
+        return clean
 
 
 class AgentManifest(BaseManifest):

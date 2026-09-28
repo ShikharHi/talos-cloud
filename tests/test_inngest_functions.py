@@ -35,6 +35,8 @@ from app.inngest.functions.maintenance import (
 )
 from app.inngest.functions.monitoring import monitoring_margin_check_fn
 from app.inngest.functions.auth import auth_cleanup_expired_tokens_fn
+from app.domain.marketplace.security import FindingSeverity, SecurityFinding, SecurityScanReport
+from app.infrastructure.security.package_scanner import PackageScanner
 
 from app.models.accounts import Account
 from app.models.marketplace import MarketplaceListing, MarketplacePackageVersion, PackageUpload
@@ -265,3 +267,95 @@ async def test_inngest_marketplace_promotion_idempotency(db_session):
         result = await marketplace_verify_and_promote_fn._handler(dummy_ctx, dummy_step)
         assert result["status"] == "promoted"
         assert result.get("idempotent") is True
+
+
+@pytest.mark.asyncio
+async def test_inngest_rejects_critical_skill_before_promotion(db_session, monkeypatch):
+    user_id = uuid.uuid4()
+    account = Account(account_id=user_id, email=f"inngest_scan_{user_id.hex[:6]}@example.com")
+    db_session.add(account)
+    await db_session.flush()
+
+    listing = MarketplaceListing(
+        listing_id=uuid.uuid4(),
+        author_account_id=user_id,
+        publisher_slug="alice",
+        author_username="alice",
+        kind="skill",
+        slug="unsafe-skill",
+        display_name="Unsafe Skill",
+        status="pending_review",
+        version="1.0.0",
+    )
+    upload = PackageUpload(
+        upload_id=uuid.uuid4(),
+        account_id=user_id,
+        listing_id=listing.listing_id,
+        resource_type="skill",
+        resource_id="unsafe-skill",
+        version="1.0.0",
+        object_key="uploads/skills/unsafe-skill/package.zip",
+        staging_key="uploads/skills/unsafe-skill/package.zip",
+        bucket="talos-marketplace",
+        status="pending",
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+    )
+    db_session.add_all([listing, upload])
+    await db_session.commit()
+
+    class FakeStorage:
+        async def download_to_file(self, key, file):
+            file.write(b"archive")
+            return 7
+
+        async def promote_staging_to_canonical(self, **kwargs):
+            raise AssertionError("Critical package must not be promoted")
+
+    report = SecurityScanReport(
+        valid=True,
+        sha256="abc",
+        file_size=7,
+        uncompressed_size=7,
+        entry_count=1,
+        findings=[
+            SecurityFinding(
+                rule_id="TEST_CRITICAL",
+                severity=FindingSeverity.CRITICAL,
+                message="Blocked by test",
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        "app.inngest.functions.marketplace.TigrisMarketplaceStorage",
+        FakeStorage,
+    )
+    monkeypatch.setattr(
+        PackageScanner,
+        "scan_archive_stream",
+        classmethod(lambda cls, **kwargs: report),
+    )
+
+    class DummyStep:
+        async def run(self, step_id, fn, *args, **kwargs):
+            return await fn()
+
+    class SessionContext:
+        async def __aenter__(self):
+            return db_session
+
+        async def __aexit__(self, *args):
+            pass
+
+    with patch(
+        "app.inngest.functions.marketplace.get_session_factory",
+        return_value=lambda: SessionContext(),
+    ):
+        ctx = MagicMock()
+        ctx.event.data = {"upload_id": str(upload.upload_id)}
+        result = await marketplace_verify_and_promote_fn._handler(ctx, DummyStep())
+
+    assert result["status"] == "failed"
+    await db_session.refresh(upload)
+    await db_session.refresh(listing)
+    assert upload.status == "failed"
+    assert listing.status == "pending_review"

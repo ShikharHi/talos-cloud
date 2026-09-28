@@ -77,6 +77,14 @@ class MarketplaceListing(Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending_review")
     # Visibility: public | private | unlisted
     visibility: Mapped[str] = mapped_column(String(20), nullable=False, default="public")
+    # Pricing & Economy
+    pricing_type: Mapped[str] = mapped_column(String(20), nullable=False, default="free")  # free | paid
+    price_credits: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    version_policy: Mapped[str] = mapped_column(String(50), nullable=False, default="all_minor_patch")
+    verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Distinct lifecycle metrics
+    download_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    purchase_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # Cached latest version string
     version: Mapped[str] = mapped_column(String(50), nullable=False, default="1.0.0")
     # Cached install count derived from active UserInstall rows
@@ -97,6 +105,12 @@ class MarketplaceListing(Base):
         back_populates="listing", cascade="all, delete-orphan", order_by="desc(MarketplacePackageVersion.created_at)"
     )
     reviews: Mapped[list["MarketplaceReview"]] = relationship(
+        back_populates="listing", cascade="all, delete-orphan"
+    )
+    entitlements: Mapped[list["MarketplaceEntitlement"]] = relationship(
+        back_populates="listing", cascade="all, delete-orphan"
+    )
+    earnings: Mapped[list["CreatorEarning"]] = relationship(
         back_populates="listing", cascade="all, delete-orphan"
     )
 
@@ -317,3 +331,90 @@ class MarketplaceAdminAudit(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, server_default=func.now()
     )
+
+
+class MarketplaceEntitlement(Base):
+    """
+    Purchase Entitlement: Records ownership of a marketplace listing.
+    Decoupled from installation: Purchase -> Entitlement -> Install.
+    Re-installation never requires re-purchase.
+    """
+    __tablename__ = "marketplace_entitlements"
+    __table_args__ = (
+        UniqueConstraint("account_id", "listing_id", name="uq_account_listing_entitlement"),
+        Index("ix_marketplace_entitlements_account", "account_id"),
+        Index("ix_marketplace_entitlements_listing", "listing_id"),
+    )
+
+    entitlement_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("accounts.account_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    listing_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("marketplace_listings.listing_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    purchase_id: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    price_paid_credits: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    version_policy: Mapped[str] = mapped_column(String(50), nullable=False, default="all_minor_patch")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")  # active | revoked | refunded
+    acquired_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+    listing: Mapped["MarketplaceListing"] = relationship(back_populates="entitlements")
+
+
+class CreatorEarning(Base):
+    """
+    Creator Earnings Ledger: Tracks marketplace creator revenue allocations separately
+    from regular user wallets. 50% Platform / 50% Creator development split.
+    """
+    __tablename__ = "creator_earnings"
+    __table_args__ = (
+        Index("ix_creator_earnings_creator", "creator_id"),
+        Index("ix_creator_earnings_listing", "listing_id"),
+        Index("ix_creator_earnings_purchase", "purchase_id"),
+    )
+
+    earning_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    creator_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("accounts.account_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    listing_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("marketplace_listings.listing_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    version_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("marketplace_package_versions.version_id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    purchase_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    gross_credits: Mapped[int] = mapped_column(Integer, nullable=False)
+    platform_share_credits: Mapped[int] = mapped_column(Integer, nullable=False)
+    creator_share_credits: Mapped[int] = mapped_column(Integer, nullable=False)
+    # status: pending | available | held | reversed | refunded
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="available")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+    listing: Mapped["MarketplaceListing"] = relationship(back_populates="earnings")
+

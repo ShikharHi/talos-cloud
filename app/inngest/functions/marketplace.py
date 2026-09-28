@@ -116,6 +116,16 @@ async def marketplace_verify_and_promote_fn(
                 await session.commit()
                 raise inngest.NonRetriableError(f"Archive scan failed: {exc}")
 
+            if report.has_critical_findings:
+                upload.status = UploadStatus.FAILED.value
+                upload.failure_reason = "Security scan reported critical findings."
+                await session.commit()
+                return {
+                    "rejected": True,
+                    "upload_id": upload_id_str,
+                    "reason": upload.failure_reason,
+                }
+
             upload.status = UploadStatus.VERIFIED.value
             upload.verified_at = datetime.now(timezone.utc)
             await session.commit()
@@ -139,6 +149,8 @@ async def marketplace_verify_and_promote_fn(
 
     if verify_result.get("already_promoted"):
         return {"status": "promoted", "upload_id": upload_id_str, "idempotent": True}
+    if verify_result.get("rejected"):
+        return {"status": "failed", "upload_id": upload_id_str, "reason": verify_result["reason"]}
 
     staging_key = verify_result["staging_key"]
     canonical_key = verify_result["canonical_key"]
