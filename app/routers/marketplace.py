@@ -788,6 +788,30 @@ async def delete_listing(
             detail=f"Cannot unpublish: package is required as a dependency by approved packages: {', '.join(dep_names)}",
         )
 
+    try:
+        storage = get_storage_service()
+        # Delete all package version files from storage
+        ver_del_stmt = select(MarketplacePackageVersion).where(
+            MarketplacePackageVersion.listing_id == listing.listing_id
+        )
+        versions = (await db.execute(ver_del_stmt)).scalars().all()
+        for ver in versions:
+            if ver.storage_key:
+                try:
+                    await storage.provider.delete(ver.storage_key, bucket=ver.bucket)
+                except Exception:
+                    pass
+    except Exception as storage_err:
+        logger.warning("Could not delete package files from storage during unpublish: %s", storage_err)
+
+    try:
+        from app.services.marketplace.search_service import WeaviateSearchService
+        weaviate_svc = WeaviateSearchService()
+        if weaviate_svc.is_configured:
+            await weaviate_svc.delete_item(str(listing.listing_id))
+    except Exception as search_err:
+        logger.warning("Could not remove listing from search index: %s", search_err)
+
     # Safe unpublishing: if active installs exist and caller is not admin,
     # tombstone it so existing users keep their installs, while new discovery/installs are stopped.
     if listing.install_count > 0 and not is_admin:
@@ -801,6 +825,72 @@ async def delete_listing(
     await db.delete(listing)
     await db.commit()
     return {"ok": True}
+
+
+@router.post("/listings/{listing_id}/unpublish")
+async def unpublish_listing_by_id(
+    listing_id: str,
+    session: WebSession = Depends(get_current_session),
+    db: AsyncSession = Depends(get_db),
+):
+    """Unpublish a listing by its UUID. Used by the frontend unpublish action."""
+    import uuid as _uuid
+    try:
+        lid = _uuid.UUID(listing_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid listing_id")
+    
+    stmt = select(MarketplaceListing).where(MarketplaceListing.listing_id == lid)
+    listing = (await db.execute(stmt)).scalars().first()
+    if not listing:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    
+    is_admin = getattr(session, "role", "user") == "admin"
+    user_prefix = (session.email.split("@")[0] if session.email else "").lower()
+    listing_author = (listing.author_username or "").lower()
+    is_author = (
+        (listing.author_account_id == session.account_id)
+        or (listing_author == user_prefix)
+        or (listing_author == (session.email or "").lower())
+    )
+    if not is_admin and not is_author:
+        raise HTTPException(status_code=403, detail="Forbidden: You can only unpublish your own listings.")
+    
+    # Delete from storage
+    try:
+        storage = get_storage_service()
+        ver_stmt = select(MarketplacePackageVersion).where(
+            MarketplacePackageVersion.listing_id == listing.listing_id
+        )
+        versions = (await db.execute(ver_stmt)).scalars().all()
+        for ver in versions:
+            if ver.storage_key:
+                try:
+                    await storage.provider.delete(ver.storage_key, bucket=ver.bucket)
+                except Exception:
+                    pass
+    except Exception as storage_err:
+        logger.warning("Storage cleanup during unpublish: %s", storage_err)
+    
+    # Remove from Weaviate search index
+    try:
+        from app.services.marketplace.search_service import WeaviateSearchService
+        weaviate_svc = WeaviateSearchService()
+        if weaviate_svc.is_configured:
+            await weaviate_svc.delete_item(str(listing.listing_id))
+    except Exception:
+        pass
+    
+    # Tombstone if has installs, otherwise hard delete
+    if listing.install_count > 0 and not is_admin:
+        listing.status = "tombstoned"
+        await db.commit()
+        return {"ok": True, "status": "tombstoned"}
+    
+    await db.execute(delete(UserInstall).where(UserInstall.listing_id == listing.listing_id))
+    await db.delete(listing)
+    await db.commit()
+    return {"ok": True, "status": "deleted"}
 
 
 @router.get("/inspect/tree/{author}/{slug}")
