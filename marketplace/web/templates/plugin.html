@@ -1,0 +1,166 @@
+{% extends "base.html" %}
+
+{% block title %}{{ plugin.name }} — by @{{ plugin.builder_username }} | Talos Marketplace{% endblock %}
+{% block meta_description %}{{ plugin.short_desc or plugin.description }}{% endblock %}
+
+{% block og_title %}{{ plugin.name }} — by @{{ plugin.builder_username }}{% endblock %}
+{% block og_desc %}⭐ {{ "%.1f"|format(plugin.rating_avg) if plugin.rating_avg else "New" }} · {{ "{:,}".format(plugin.downloads_count) }} installs — {{ plugin.short_desc or plugin.description }}{% endblock %}
+{% block og_image %}/og/plugins/{{ plugin.category }}/{{ plugin.slug }}.png{% endblock %}
+{% block og_url %}{{ canonical_url }}{% endblock %}
+
+{% block tw_title %}{{ plugin.name }} — by @{{ plugin.builder_username }}{% endblock %}
+{% block tw_desc %}⭐ {{ "%.1f"|format(plugin.rating_avg) if plugin.rating_avg else "New" }} · {{ "{:,}".format(plugin.downloads_count) }} installs — {{ plugin.short_desc or plugin.description }}{% endblock %}
+{% block tw_image %}/og/plugins/{{ plugin.category }}/{{ plugin.slug }}.png{% endblock %}
+
+{% block json_ld %}
+<script type="application/ld+json">
+{{ json_ld_str | safe }}
+</script>
+{% endblock %}
+
+{% block content %}
+<div class="card">
+  <div style="display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 1rem;">
+    <div>
+      <span class="badge" style="text-transform: uppercase; margin-bottom: 0.5rem;">{{ plugin.category }}</span>
+      <h1 style="font-size: 2.25rem; font-weight: 800; margin-bottom: 0.25rem;">{{ plugin.name }}</h1>
+      <p style="color: var(--text-muted); font-size: 1.1rem;">
+        Built by <a href="/builders/{{ plugin.builder_username }}" style="color: #818cf8; text-decoration: none; font-weight: 600;">@{{ plugin.builder_username }}</a>
+        {% if plugin.builder_official %}<span class="badge badge-official">Official</span>{% endif %}
+        {% if plugin.builder_verified %}<span class="badge badge-verified">Verified</span>{% endif %}
+      </p>
+    </div>
+    <div style="display: flex; gap: 0.75rem;">
+      <a href="talos://install/{{ plugin.category }}/{{ plugin.slug }}" id="installBtn" class="btn btn-primary">
+        ⚡ Install in Talos
+      </a>
+      <button onclick="openShareModal()" class="btn btn-secondary">
+        🔗 Share
+      </button>
+    </div>
+  </div>
+
+  <div style="display: flex; gap: 2rem; margin-top: 1.5rem; padding-top: 1.5rem; border-top: 1px solid var(--card-border); color: var(--text-muted); font-size: 0.95rem; flex-wrap: wrap;">
+    <div>⭐ <strong style="color: #fff;">{{ "%.1f"|format(plugin.rating_avg) if plugin.rating_avg else "New" }}</strong> ({{ plugin.rating_count }} ratings)</div>
+    <div>📥 <strong style="color: #fff;">{{ "{:,}".format(plugin.downloads_count) }}</strong> installs</div>
+    <div>📦 Version: <strong style="color: #fff;">{{ plugin.latest_version or "1.0.0" }}</strong></div>
+  </div>
+</div>
+
+<!-- Modal Fallback for Deep Link -->
+<div id="fallbackModal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7); backdrop-filter: blur(4px); align-items: center; justify-content: center; z-index: 100;">
+  <div class="card" style="max-width: 480px; width: 90%; text-align: center;">
+    <h3 style="font-size: 1.4rem; margin-bottom: 1rem;">Opening Talos...</h3>
+    <p style="color: var(--text-muted); margin-bottom: 1.5rem;">
+      If you don't have Talos installed yet, download it below to install <strong>{{ plugin.name }}</strong> automatically.
+    </p>
+    <div style="display: flex; flex-direction: column; gap: 0.75rem;">
+      <a href="https://talos.ai/download?ref_plugin={{ plugin.slug }}" class="btn btn-primary">Download Talos</a>
+      <button onclick="document.getElementById('fallbackModal').style.display='none'" class="btn btn-secondary">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Share Popover Modal -->
+<div id="shareModal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7); backdrop-filter: blur(4px); align-items: center; justify-content: center; z-index: 100;">
+  <div class="card" style="max-width: 480px; width: 90%;">
+    <h3 style="font-size: 1.3rem; margin-bottom: 1rem;">Share this Plugin</h3>
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin-bottom: 1.5rem;">
+      <a href="https://twitter.com/intent/tweet?text={{ share_text_encoded }}&url={{ share_url_encoded }}?utm_source=twitter" target="_blank" class="btn btn-secondary" onclick="logShare('x')">Share to X</a>
+      <a href="https://reddit.com/submit?url={{ share_url_encoded }}?utm_source=reddit&title={{ share_text_encoded }}" target="_blank" class="btn btn-secondary" onclick="logShare('reddit')">Reddit</a>
+      <a href="https://www.linkedin.com/sharing/share-offsite/?url={{ share_url_encoded }}?utm_source=linkedin" target="_blank" class="btn btn-secondary" onclick="logShare('linkedin')">LinkedIn</a>
+      <button onclick="navigator.clipboard.writeText(window.location.href + '?utm_source=copy'); alert('Link copied!');" class="btn btn-secondary">Copy Link</button>
+    </div>
+    <button onclick="document.getElementById('shareModal').style.display='none'" class="btn btn-secondary" style="width: 100%;">Close</button>
+  </div>
+</div>
+
+<!-- Description and Details -->
+<div class="card">
+  <h2 style="font-size: 1.4rem; margin-bottom: 1rem; border-bottom: 1px solid var(--card-border); padding-bottom: 0.5rem;">About this Plugin</h2>
+  <div style="color: #cbd5e1; line-height: 1.7;">
+    {{ rendered_description | safe }}
+  </div>
+</div>
+
+<!-- Reviews & Histogram -->
+<div class="card">
+  <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
+    <h2 style="font-size: 1.4rem;">Reviews & Ratings</h2>
+    <div style="font-size: 1.2rem; font-weight: 700;">
+      ⭐ {{ "%.1f"|format(plugin.rating_avg) if plugin.rating_avg else "N/A" }}
+      <span style="font-size: 0.9rem; color: var(--text-muted); font-weight: normal;">({{ plugin.rating_count }} reviews)</span>
+    </div>
+  </div>
+
+  <!-- Rating Histogram -->
+  <div style="margin-bottom: 2rem; background: #0f172a; padding: 1rem; border-radius: 8px;">
+    {% for stars in [5, 4, 3, 2, 1] %}
+    {% set count = plugin.rating_hist[stars-1] if plugin.rating_hist and plugin.rating_hist|length >= stars else 0 %}
+    {% set pct = (count / plugin.rating_count * 100) if plugin.rating_count and plugin.rating_count > 0 else 0 %}
+    <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.4rem; font-size: 0.85rem; color: var(--text-muted);">
+      <span style="width: 45px;">{{ stars }} ★</span>
+      <div style="flex: 1; height: 8px; background: #1e293b; border-radius: 4px; overflow: hidden;">
+        <div style="width: {{ pct }}%; height: 100%; background: #fbbf24;"></div>
+      </div>
+      <span style="width: 35px; text-align: right;">{{ count }}</span>
+    </div>
+    {% endfor %}
+  </div>
+
+  <!-- Reviews List -->
+  {% if reviews and reviews|length > 0 %}
+    {% for rev in reviews %}
+    <div style="border-top: 1px solid var(--card-border); padding: 1.25rem 0;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+        <div>
+          <strong style="color: #fff;">{{ rev.reviewer_name }}</strong>
+          {% if rev.rating_stars %}<span style="color: #fbbf24; margin-left: 0.5rem;">{{ "★" * rev.rating_stars }}</span>{% endif %}
+        </div>
+        <span style="font-size: 0.8rem; color: var(--text-muted);">{{ rev.created_at.strftime('%b %d, %Y') if rev.created_at else '' }}</span>
+      </div>
+      <p style="color: #cbd5e1; margin-bottom: 0.75rem;">{{ rev.body }}</p>
+
+      <!-- Nested Builder Replies -->
+      {% if rev.replies and rev.replies|length > 0 %}
+        {% for rep in rev.replies %}
+        <div style="background: #1e1b4b; border-left: 3px solid #6366f1; padding: 0.75rem 1rem; border-radius: 6px; margin-top: 0.75rem;">
+          <div style="font-size: 0.85rem; color: #a5b4fc; font-weight: 600; margin-bottom: 0.25rem;">
+            Builder Reply (@{{ plugin.builder_username }})
+          </div>
+          <p style="color: #e0e7ff; font-size: 0.95rem;">{{ rep.body }}</p>
+        </div>
+        {% endfor %}
+      {% endif %}
+    </div>
+    {% endfor %}
+  {% else %}
+    <p style="color: var(--text-muted); text-align: center; padding: 2rem 0;">No reviews yet. Install this plugin in Talos to leave the first review!</p>
+  {% endif %}
+</div>
+
+<script>
+  function openShareModal() {
+    document.getElementById('shareModal').style.display = 'flex';
+  }
+  function logShare(platform) {
+    fetch('/v1/marketplace/events', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind: 'share_click', plugin_id: '{{ plugin.id }}', utm_source: platform })
+    }).catch(()=>{});
+  }
+  document.getElementById('installBtn').addEventListener('click', function(e) {
+    // Log install click
+    fetch('/v1/marketplace/events', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind: 'install_click', plugin_id: '{{ plugin.id }}' })
+    }).catch(()=>{});
+    // Set fallback timeout if protocol not handled
+    setTimeout(function() {
+      document.getElementById('fallbackModal').style.display = 'flex';
+    }, 1500);
+  });
+</script>
+{% endblock %}

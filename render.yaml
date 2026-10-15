@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: talos-cloud
+    runtime: python
+    region: singapore
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "uvicorn main:app --host 0.0.0.0 --port $PORT"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: TALOS_ENV
+        value: production
+      - key: TALOS_INTERNAL_SECRET
+        value: talos_internal_default_secret_key_v6
+      - key: TALOS_POSTGRES_URL
+        value: postgresql://neondb_owner:npg_M3sy7XuIZYve@ep-summer-breeze-a19m47fw-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require
+      - key: TIGRIS_ENDPOINT
+        value: https://t3.storage.dev
+      - key: TIGRIS_BUCKET
+        value: talos-marketplace
+      - key: AWS_ACCESS_KEY_ID
+        value: tid_dMuueTNqHnnhVFsPCSZlmiswHvuETbkScpLVVfUC_SYXTxmasi
+      - key: AWS_SECRET_ACCESS_KEY
+        value: tsec_9mNqRJUXQ6tG1eOBHm58WglfsyzSZdT6lxIJpba1ftlFz4Nlh3RVlKf7ILZ9RFRMyc5sEE
+      - key: UPSTASH_REDIS_REST_URL
+        value: https://amazed-eft-176812.upstash.io
+      - key: UPSTASH_REDIS_REST_TOKEN
+        value: gQAAAAAAArKsAAIgcDJkN2FkNWQ3YmExMGY0ZDE1OGU4ZjJkOWFiNTQ0MDZjMg
+      - key: MISTRAL_API_KEY
+        value: mstrl_8JVtvxxLTxB1EKIwM5caxF86S3XTkECh_1S9IKh
+      - key: MISTRAL_BASE_URL
+        value: https://api.mistral.ai/v1

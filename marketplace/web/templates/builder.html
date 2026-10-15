@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+
+{% block title %}@{{ builder.username }} — Builder Profile | Talos Marketplace{% endblock %}
+{% block meta_description %}{{ builder.bio or 'Creator profile on Talos Marketplace.' }}{% endblock %}
+
+{% block og_title %}{{ builder.display_name }} (@{{ builder.username }}){% endblock %}
+{% block og_desc %}⭐ {{ "%.1f"|format(builder.rating_avg) if builder.rating_avg else "New Builder" }} · {{ builder.plugin_count }} plugins · {{ "{:,}".format(builder.install_count) }} installs{% endblock %}
+{% block og_image %}/og/builders/{{ builder.username }}.png{% endblock %}
+{% block og_url %}{{ canonical_url }}{% endblock %}
+
+{% block tw_title %}{{ builder.display_name }} (@{{ builder.username }}){% endblock %}
+{% block tw_desc %}⭐ {{ "%.1f"|format(builder.rating_avg) if builder.rating_avg else "New Builder" }} · {{ builder.plugin_count }} plugins · {{ "{:,}".format(builder.install_count) }} installs{% endblock %}
+{% block tw_image %}/og/builders/{{ builder.username }}.png{% endblock %}
+
+{% block json_ld %}
+<script type="application/ld+json">
+{{ json_ld_str | safe }}
+</script>
+{% endblock %}
+
+{% block content %}
+<div class="card">
+  <div style="display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 1.5rem;">
+    <div style="display: flex; gap: 1.5rem; align-items: center;">
+      <div style="width: 80px; height: 80px; border-radius: 50%; background: #1e1b4b; border: 2px solid #6366f1; display: flex; align-items: center; justify-content: center; font-size: 2rem; font-weight: 700; color: #a5b4fc;">
+        {{ builder.display_name[:1].upper() }}
+      </div>
+      <div>
+        <h1 style="font-size: 2rem; font-weight: 800; margin-bottom: 0.2rem;">{{ builder.display_name }}</h1>
+        <div style="color: var(--text-muted); font-size: 1.1rem; margin-bottom: 0.5rem;">
+          @{{ builder.username }}
+        </div>
+        <p style="color: #cbd5e1; max-width: 600px;">{{ builder.bio or "Builder on the Talos platform." }}</p>
+      </div>
+    </div>
+    <button onclick="navigator.clipboard.writeText(window.location.href); alert('Profile link copied!');" class="btn btn-secondary">
+      🔗 Share Profile
+    </button>
+  </div>
+
+  <div style="display: flex; gap: 2rem; margin-top: 1.5rem; padding-top: 1.5rem; border-top: 1px solid var(--card-border); color: var(--text-muted); font-size: 0.95rem; flex-wrap: wrap;">
+    <div>⭐ Builder Score: <strong style="color: #fff;">{{ "%.1f"|format(builder.rating_avg) if builder.rating_avg else "New Builder" }}</strong></div>
+    <div>📦 Plugins: <strong style="color: #fff;">{{ builder.plugin_count }}</strong></div>
+    <div>📥 Total Installs: <strong style="color: #fff;">{{ "{:,}".format(builder.install_count) }}</strong></div>
+  </div>
+</div>
+
+<div class="card">
+  <h2 style="font-size: 1.4rem; margin-bottom: 1.5rem;">Published Plugins</h2>
+  {% if plugins and plugins|length > 0 %}
+    <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1.25rem;">
+      {% for p in plugins %}
+      <div style="background: #0f172a; border: 1px solid var(--card-border); border-radius: 8px; padding: 1.25rem; display: flex; flex-direction: column; justify-content: space-between;">
+        <div>
+          <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem;">
+            <span class="badge">{{ p.category }}</span>
+            <span style="font-size: 0.85rem; color: #fbbf24;">⭐ {{ "%.1f"|format(p.rating_avg) if p.rating_avg else "New" }}</span>
+          </div>
+          <h3 style="font-size: 1.15rem; margin-bottom: 0.5rem;">
+            <a href="/plugins/{{ p.category }}/{{ p.slug }}" style="color: #fff; text-decoration: none;">{{ p.name }}</a>
+          </h3>
+          <p style="color: var(--text-muted); font-size: 0.9rem; margin-bottom: 1rem;">{{ p.short_desc or p.description }}</p>
+        </div>
+        <div style="display: flex; justify-content: space-between; align-items: center; border-top: 1px solid #1e293b; padding-top: 0.75rem;">
+          <span style="font-size: 0.8rem; color: var(--text-muted);">📥 {{ "{:,}".format(p.downloads_count) }} installs</span>
+          <a href="/plugins/{{ p.category }}/{{ p.slug }}" class="btn btn-secondary" style="padding: 0.4rem 0.8rem; font-size: 0.85rem;">View</a>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  {% else %}
+    <p style="color: var(--text-muted); text-align: center; padding: 2rem 0;">No plugins published yet.</p>
+  {% endif %}
+</div>
+{% endblock %}
