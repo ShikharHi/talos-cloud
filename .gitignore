@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.env
+.venv/
+env/
+venv/
+storage/agents/*
+storage/skills/*
+storage/mcp/*
+!storage/agents/.gitkeep
+!storage/skills/.gitkeep
+!storage/mcp/.gitkeep
