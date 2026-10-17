@@ -109,6 +109,19 @@ async def public_chat_endpoint(
 
     return StreamingResponse(sse_generator(), media_type="text/event-stream")
 
+class CreateThreadRequest(BaseModel):
+    thread_id: str
+    title: str
+
+@router.post("/threads")
+async def create_or_index_thread(
+    req: CreateThreadRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """Index or update thread in Cloud DB."""
+    await auth_repo.index_thread(req.thread_id, current_user["id"], req.title)
+    return {"status": "success", "thread_id": req.thread_id}
+
 @router.get("/threads")
 async def list_user_threads(current_user: dict = Depends(get_current_user)):
     """List threads belonging exclusively to the authenticated user."""
