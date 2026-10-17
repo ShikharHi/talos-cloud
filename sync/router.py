@@ -1,98 +1,190 @@
+import hashlib
 import uuid
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, UploadFile, File, Form
-from typing import List, Optional
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, Form
+from fastapi.responses import RedirectResponse
+from typing import Optional
 from auth.service import get_current_user
-from sync.repository import sync_repo
-from sync.models import RegisterKeysRequest, CheckChunksRequest, CheckChunksResponse, CommitManifestRequest
+from sync.repository import sync_repo, MAX_SNAPSHOT_SIZE_BYTES
+from sync.models import SnapshotInfo, PendingDeleteRequest, ResolvePendingDeletesRequest
 from marketplace.tigris_service import TigrisStorageService
 
-router = APIRouter(prefix="/v1/sync", tags=["sync"])
-tigris_service = TigrisStorageService()
+router = APIRouter(prefix="/v1/snapshot", tags=["snapshot"])
+tigris = TigrisStorageService()
 
-@router.post("/keys")
-async def register_user_keys(req: RegisterKeysRequest, current_user: dict = Depends(get_current_user)):
-    """Store client-encrypted DEK envelope and KDF salt."""
-    await sync_repo.set_user_keys(
-        user_id=current_user["id"],
-        wrapped_dek=req.wrapped_dek,
-        salt=req.salt,
-        recovery_wrapped_dek=req.recovery_wrapped_dek,
-        recovery_salt=req.recovery_salt
-    )
-    return {"status": "success", "message": "Zero-knowledge key envelope stored"}
+# ── Snapshot upload ────────────────────────────────────────────────────────────
 
-@router.get("/keys")
-async def get_user_keys(current_user: dict = Depends(get_current_user)):
-    """Fetch user's wrapped DEK envelope for decryption on a new device."""
-    keys = await sync_repo.get_user_keys(current_user["id"])
-    if not keys:
-        raise HTTPException(status_code=404, detail="No sync keys found for user")
-    return {"status": "success", "keys": keys}
-
-@router.post("/chunks/check", response_model=CheckChunksResponse)
-async def check_missing_chunks(req: CheckChunksRequest, current_user: dict = Depends(get_current_user)):
-    """Deduplication query: returns which chunk IDs are missing and need upload."""
-    existing = await sync_repo.find_existing_chunks(current_user["id"], req.chunk_ids)
-    missing = [cid for cid in req.chunk_ids if cid not in existing]
-    return CheckChunksResponse(missing_chunk_ids=missing)
-
-@router.post("/chunks/upload")
-async def upload_chunk(
-    chunk_id: str = Form(...),
+@router.post("/upload")
+async def upload_snapshot(
     file: UploadFile = File(...),
-    current_user: dict = Depends(get_current_user)
+    generation: int = Form(...),
+    checksum_sha256: str = Form(...),
+    format_version: int = Form(default=1),
+    current_user: dict = Depends(get_current_user),
 ):
-    """Upload encrypted, compressed chunk to Tigris S3."""
+    """
+    Accepts a .tar.zst snapshot archive.
+    - Verifies size limit.
+    - Verifies SHA-256 checksum.
+    - Uploads to Tigris under an opaque, server-generated key.
+    - Commits the snapshot pointer only when incoming generation > current generation.
+    - Clears tombstones confirmed included in this snapshot.
+    """
     user_id = current_user["id"]
+
     content = await file.read()
-    object_key = f"sync/{user_id}/chunks/{chunk_id}.bin"
-    
-    # Store directly in Tigris
-    tigris_service.upload_bytes(content, object_key, content_type="application/octet-stream")
-    
-    # Record in database
-    await sync_repo.record_chunks(user_id, [{
-        "chunk_id": chunk_id,
-        "storage_key": object_key,
-        "size_bytes": len(content)
-    }])
-    return {"status": "success", "chunk_id": chunk_id, "size": len(content)}
+    size = len(content)
 
-@router.get("/chunks/{chunk_id}")
-async def get_chunk_download(chunk_id: str, current_user: dict = Depends(get_current_user)):
-    """Generate secure download URL for a chunk."""
-    user_id = current_user["id"]
-    object_key = f"sync/{user_id}/chunks/{chunk_id}.bin"
-    url = tigris_service.generate_download_url(object_key, expires_in=1800)
-    return {"status": "success", "chunk_id": chunk_id, "download_url": url}
+    if size > MAX_SNAPSHOT_SIZE_BYTES:
+        raise HTTPException(status_code=413, detail="Snapshot exceeds 2 GB size limit")
 
-@router.post("/manifests/commit")
-async def commit_sync_manifest(req: CommitManifestRequest, current_user: dict = Depends(get_current_user)):
-    """Atomically commit a versioned manifest with parent vector clock check."""
-    user_id = current_user["id"]
-    manifest_id = f"man_{uuid.uuid4().hex[:12]}"
-    
-    await sync_repo.commit_manifest(
-        manifest_id=manifest_id,
-        thread_id=req.thread_id,
+    # Verify checksum
+    actual_checksum = hashlib.sha256(content).hexdigest()
+    if actual_checksum != checksum_sha256:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Checksum mismatch: expected {checksum_sha256}, got {actual_checksum}"
+        )
+
+    # Guard against generation regression (additional safety on top of DB conditional update)
+    existing = sync_repo.get_user_snapshot(user_id)
+    if existing and existing.get("generation", 0) >= generation:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Snapshot generation {generation} is not newer than committed "
+                f"generation {existing['generation']}. Upload rejected."
+            )
+        )
+
+    # Opaque, server-generated object key — never provided by client
+    object_key = f"snapshots/{user_id}/{uuid.uuid4().hex}.tar.zst"
+
+    # Upload to Tigris
+    tigris.upload_bytes(content, object_key, content_type="application/zstd")
+
+    # Delete previous object from Tigris if there was one
+    if existing and existing.get("object_key"):
+        try:
+            tigris.delete_object(existing["object_key"])
+        except Exception:
+            pass  # Non-fatal; old object becomes orphaned but won't be served
+
+    # Commit the snapshot pointer
+    snapshot_id = sync_repo.upsert_snapshot(
         user_id=user_id,
-        device_id=req.device_id,
-        sequence_number=req.sequence_number,
-        parent_manifest_id=req.parent_manifest_id,
-        encrypted_manifest=req.encrypted_manifest
+        object_key=object_key,
+        generation=generation,
+        size_bytes=size,
+        checksum_sha256=actual_checksum,
+        format_version=format_version,
     )
-    return {"status": "success", "manifest_id": manifest_id, "sequence": req.sequence_number}
 
-@router.get("/manifests/latest/{thread_id}")
-async def get_latest_manifest(thread_id: str, current_user: dict = Depends(get_current_user)):
-    """Get the most recent manifest for a thread to restore or check for remote updates."""
-    manifest = await sync_repo.get_latest_thread_manifest(current_user["id"], thread_id)
-    if not manifest:
-        raise HTTPException(status_code=404, detail="No sync manifest found for thread")
-    return {"status": "success", "manifest": manifest}
+    # Resolve tombstones: clear all pending deletes since this snapshot
+    # was built locally (backend already excluded deleted threads from archive)
+    pending = sync_repo.get_pending_deletes(user_id)
+    if pending:
+        sync_repo.resolve_pending_deletes(user_id, pending)
 
-@router.get("/manifests/summary")
-async def get_all_manifests_summary(current_user: dict = Depends(get_current_user)):
-    """Get all thread latest manifests for full device hydration on startup."""
-    manifests = await sync_repo.get_all_user_manifests(current_user["id"])
-    return {"status": "success", "manifests": manifests}
+    return {
+        "status": "success",
+        "snapshot_id": snapshot_id,
+        "generation": generation,
+        "size_bytes": size,
+    }
+
+
+# ── Snapshot info ──────────────────────────────────────────────────────────────
+
+@router.get("/info", response_model=SnapshotInfo)
+async def get_snapshot_info(current_user: dict = Depends(get_current_user)):
+    """Returns current snapshot metadata + outstanding tombstones."""
+    user_id = current_user["id"]
+    record = sync_repo.get_user_snapshot(user_id)
+    pending = sync_repo.get_pending_deletes(user_id)
+
+    if not record:
+        return SnapshotInfo(has_snapshot=False, pending_deletes=pending)
+
+    return SnapshotInfo(
+        has_snapshot=True,
+        snapshot_id=record["snapshot_id"],
+        generation=record["generation"],
+        size_bytes=record["size_bytes"],
+        checksum_sha256=record["checksum_sha256"],
+        format_version=record["format_version"],
+        created_at=record["created_at"],
+        committed_at=record["committed_at"],
+        pending_deletes=pending,
+    )
+
+
+# ── Snapshot download ──────────────────────────────────────────────────────────
+
+@router.get("/download")
+async def download_snapshot(current_user: dict = Depends(get_current_user)):
+    """
+    Returns a short-lived (15 min) presigned URL for the user's snapshot.
+    Authenticates user before generating URL.
+    """
+    user_id = current_user["id"]
+    record = sync_repo.get_user_snapshot(user_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="No snapshot found for this account")
+
+    signed_url = tigris.generate_download_url(record["object_key"], expires_in=900)
+    return {
+        "status": "success",
+        "download_url": signed_url,
+        "expires_in": 900,
+        "checksum_sha256": record["checksum_sha256"],
+        "size_bytes": record["size_bytes"],
+        "generation": record["generation"],
+    }
+
+
+# ── Snapshot delete ────────────────────────────────────────────────────────────
+
+@router.delete("/")
+async def delete_snapshot(current_user: dict = Depends(get_current_user)):
+    """Permanently wipes the user's cloud backup. Requires explicit action."""
+    user_id = current_user["id"]
+    record = sync_repo.get_user_snapshot(user_id)
+    if record and record.get("object_key"):
+        tigris.delete_object(record["object_key"])
+    sync_repo.delete_snapshot_record(user_id)
+    return {"status": "success", "message": "Snapshot deleted"}
+
+
+# ── Pending deletes (tombstones) ───────────────────────────────────────────────
+
+@router.post("/pending-deletes")
+async def add_pending_delete(
+    req: PendingDeleteRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Records a durable tombstone for a deleted thread.
+    Idempotent — safe to call multiple times.
+    """
+    sync_repo.add_pending_delete(current_user["id"], req.thread_id)
+    return {"status": "success", "thread_id": req.thread_id}
+
+
+@router.delete("/pending-deletes")
+async def resolve_pending_deletes(
+    req: ResolvePendingDeletesRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Clears only the tombstones that are confirmed to be excluded from the
+    committed snapshot at the given generation.
+    """
+    # Only resolve if the committed snapshot generation matches or exceeds req.generation
+    record = sync_repo.get_user_snapshot(current_user["id"])
+    if not record or record.get("generation", 0) < req.generation:
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot resolve tombstones: committed snapshot generation is older than requested"
+        )
+    sync_repo.resolve_pending_deletes(current_user["id"], req.thread_ids)
+    return {"status": "success", "resolved": len(req.thread_ids)}

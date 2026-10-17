@@ -1,23 +1,34 @@
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
+from datetime import datetime
 
-class RegisterKeysRequest(BaseModel):
-    wrapped_dek: str       # Hex-encoded AES-GCM wrapped DEK
-    salt: str              # Hex-encoded KDF salt
-    recovery_wrapped_dek: Optional[str] = None
-    recovery_salt: Optional[str] = None
-    key_version: int = 1
 
-class CheckChunksRequest(BaseModel):
-    chunk_ids: List[str]
+class SnapshotUploadRequest(BaseModel):
+    """Metadata submitted alongside the multipart archive upload."""
+    generation: int = Field(..., description="Monotonically increasing generation number from client")
+    checksum_sha256: str = Field(..., description="Hex SHA-256 of the raw archive bytes")
+    format_version: int = Field(default=1)
+    size_bytes: int
 
-class CheckChunksResponse(BaseModel):
-    missing_chunk_ids: List[str]
 
-class CommitManifestRequest(BaseModel):
+class SnapshotInfo(BaseModel):
+    has_snapshot: bool
+    snapshot_id: Optional[str] = None
+    generation: Optional[int] = None
+    size_bytes: Optional[int] = None
+    checksum_sha256: Optional[str] = None
+    format_version: Optional[int] = None
+    created_at: Optional[datetime] = None
+    committed_at: Optional[datetime] = None
+    pending_deletes: List[str] = Field(default_factory=list)
+
+
+class PendingDeleteRequest(BaseModel):
     thread_id: str
-    device_id: str
-    sequence_number: int
-    parent_manifest_id: Optional[str] = None
-    encrypted_manifest: str # Hex-encoded AES-GCM encrypted metadata
-    chunk_ids: List[str]
+
+
+class ResolvePendingDeletesRequest(BaseModel):
+    """Called after a successful snapshot upload: clears only tombstones
+    that were captured in the snapshot with the given generation."""
+    generation: int
+    thread_ids: List[str]

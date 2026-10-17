@@ -32,7 +32,7 @@ from marketplace.routers.studio_router import router as studio_router
 from marketplace.routers.admin_router import router as admin_router
 from marketplace.jobs.scheduler import setup_marketplace_scheduler
 from sync.repository import sync_repo
-from sync.router import router as sync_router
+from sync.router import router as snapshot_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -84,7 +84,7 @@ app.include_router(events_router)
 app.include_router(user_router)
 app.include_router(studio_router)
 app.include_router(admin_router)
-app.include_router(sync_router)
+app.include_router(snapshot_router)
 
 @app.get("/health")
 async def health_check():
