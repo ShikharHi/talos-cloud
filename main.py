@@ -31,6 +31,8 @@ from marketplace.routers.user_router import router as user_router
 from marketplace.routers.studio_router import router as studio_router
 from marketplace.routers.admin_router import router as admin_router
 from marketplace.jobs.scheduler import setup_marketplace_scheduler
+from sync.repository import sync_repo
+from sync.router import router as sync_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -38,6 +40,7 @@ async def lifespan(app: FastAPI):
     await auth_repo.init_db()
     await billing_repo.init_db()
     await marketplace_repo.init_db()
+    await sync_repo.init_db()
     # Start background scheduler
     sched = setup_marketplace_scheduler()
     yield
@@ -81,6 +84,7 @@ app.include_router(events_router)
 app.include_router(user_router)
 app.include_router(studio_router)
 app.include_router(admin_router)
+app.include_router(sync_router)
 
 @app.get("/health")
 async def health_check():
