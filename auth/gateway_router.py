@@ -115,6 +115,28 @@ async def list_user_threads(current_user: dict = Depends(get_current_user)):
     threads = await auth_repo.get_user_threads(current_user["id"])
     return {"status": "success", "threads": threads}
 
+@router.get("/threads/{thread_id}/messages")
+async def get_thread_messages_proxy(
+    thread_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Proxy thread messages request to private backend with authenticated user context."""
+    request_id = f"req_{uuid.uuid4().hex[:12]}"
+    headers = {
+        "X-Talos-Internal-Token": INTERNAL_SECRET,
+        "X-Talos-User-ID": current_user["id"],
+        "X-Talos-Request-ID": request_id,
+    }
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        try:
+            resp = await client.get(
+                f"{BACKEND_BASE_URL}/internal/threads/{thread_id}/messages",
+                headers=headers
+            )
+            return resp.json()
+        except Exception as e:
+            return {"status": "error", "thread_id": thread_id, "messages": []}
+
 @router.delete("/threads/{thread_id}")
 async def delete_thread(
     thread_id: str,
