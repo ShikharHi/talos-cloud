@@ -1,3 +1,4 @@
+import json
 import hashlib
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, Form
@@ -19,6 +20,7 @@ async def upload_snapshot(
     generation: int = Form(...),
     checksum_sha256: str = Form(...),
     format_version: int = Form(default=1),
+    resolved_thread_ids: Optional[str] = Form(default=None),
     current_user: dict = Depends(get_current_user),
 ):
     """
@@ -79,11 +81,18 @@ async def upload_snapshot(
         format_version=format_version,
     )
 
-    # Resolve tombstones: clear all pending deletes since this snapshot
-    # was built locally (backend already excluded deleted threads from archive)
-    pending = sync_repo.get_pending_deletes(user_id)
-    if pending:
-        sync_repo.resolve_pending_deletes(user_id, pending)
+    # Resolve tombstones: clear only tombstones that were confirmed excluded from this snapshot
+    if resolved_thread_ids:
+        try:
+            ids_to_resolve = json.loads(resolved_thread_ids)
+            if isinstance(ids_to_resolve, list) and ids_to_resolve:
+                sync_repo.resolve_pending_deletes(user_id, ids_to_resolve)
+        except Exception:
+            pass
+    else:
+        pending = sync_repo.get_pending_deletes(user_id)
+        if pending:
+            sync_repo.resolve_pending_deletes(user_id, pending)
 
     return {
         "status": "success",
