@@ -835,165 +835,21 @@ async def create_install_session(
 
         await marketplace_repo.install_plugin(current_user["id"], plugin_id, plugin_version_id=plugin_version_id)
         slug = plugin["slug"]
-        dest_dir = os.path.join(os.path.expanduser("~"), ".talos", "packages", "agents", slug, target_version)
-        os.makedirs(dest_dir, exist_ok=True)
-        install_logs_list = []
-        install_success = True
-        install_err_msg = None
+        # Clean up temporary downloaded archive if created
+        if temp_agent_zip and os.path.exists(temp_agent_zip):
+            try:
+                os.remove(temp_agent_zip)
+            except Exception:
+                pass
 
-        def log_install(msg: str):
-            install_logs_list.append(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] {msg}")
-            print(f"[Install Agent {slug}] {msg}")
-
-        try:
-            log_install(f"Extracting agent files from archive to {dest_dir}...")
-            with zipfile.ZipFile(zip_path, 'r') as zf:
-                zf.extractall(dest_dir)
-            log_install("Package archive extracted successfully.")
-
-            # Check if nested folder exists (e.g. if zip has a single root folder containing agent.yaml)
-            root_yaml = os.path.join(dest_dir, "agent.yaml")
-            if not os.path.exists(root_yaml):
-                for root_dir_name in os.listdir(dest_dir):
-                    subpath = os.path.join(dest_dir, root_dir_name)
-                    if os.path.isdir(subpath) and os.path.exists(os.path.join(subpath, "agent.yaml")):
-                        log_install(f"Unnesting files from inner directory: {root_dir_name}")
-                        for item in os.listdir(subpath):
-                            src_item = os.path.join(subpath, item)
-                            dst_item = os.path.join(dest_dir, item)
-                            if os.path.exists(dst_item):
-                                if os.path.isdir(dst_item):
-                                    shutil.rmtree(dst_item)
-                                else:
-                                    os.remove(dst_item)
-                            shutil.move(src_item, dst_item)
-                        try:
-                            shutil.rmtree(subpath)
-                        except Exception:
-                            pass
-                        break
-
-            # 1. Install dependencies from requirements.txt or pyproject.toml if present
-            py_exec = sys.executable
-            req_file = os.path.join(dest_dir, "requirements.txt")
-            if os.path.exists(req_file):
-                log_install("Found requirements.txt. Installing dependencies via pip...")
-                pip_proc = subprocess.run(
-                    [py_exec, "-m", "pip", "install", "-r", req_file],
-                    cwd=dest_dir,
-                    capture_output=True,
-                    text=True,
-                    timeout=300
-                )
-                if pip_proc.stdout:
-                    install_logs_list.append(pip_proc.stdout[-2000:])
-                if pip_proc.returncode != 0:
-                    err_text = pip_proc.stderr or "Pip install failed"
-                    log_install(f"Warning: pip install returned non-zero code {pip_proc.returncode}: {err_text[:400]}")
-                else:
-                    log_install("Requirements installed successfully.")
-            else:
-                log_install("No requirements.txt found. Skipping pip install.")
-
-            # 2. Test-launch A2A sub-agent server on temporary port
-            yaml_path = os.path.join(dest_dir, "agent.yaml")
-            manifest = {}
-            if os.path.exists(yaml_path):
-                with open(yaml_path, "r", encoding="utf-8") as yf:
-                    manifest = yaml.safe_load(yf) or {}
-
-            runtime = manifest.get("runtime", {})
-            entrypoint = runtime.get("entrypoint", "")
-            if entrypoint:
-                module = entrypoint.split(":")[0]
-                # Find available test port
-                test_port = 9390
-                for p in range(9300, 9500):
-                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                        try:
-                            s.bind(("0.0.0.0", p))
-                            test_port = p
-                            break
-                        except OSError:
-                            continue
-
-                log_install(f"Validating A2A server launch: testing entrypoint '{entrypoint}' on port {test_port}...")
-                test_env = dict(os.environ)
-                test_env["PORT"] = str(test_port)
-                test_env["BASE_URL"] = f"http://localhost:8000/v1"
-                test_env["API_KEY"] = "test-verification-key"
-
-                test_proc = subprocess.Popen(
-                    [py_exec, "-m", module, "--port", str(test_port)],
-                    cwd=dest_dir,
-                    env=test_env,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE
-                )
-
-                # Wait up to 10 seconds for server to start and respond
-                server_ok = False
-                for _ in range(15):
-                    if test_proc.poll() is not None:
-                        break
-                    try:
-                        async with httpx.AsyncClient(timeout=1.0) as client:
-                            resp = await client.get(f"http://127.0.0.1:{test_port}/.well-known/agent.json")
-                            if resp.status_code == 200:
-                                server_ok = True
-                                break
-                    except Exception:
-                        pass
-                    await asyncio.sleep(0.5)
-
-                # Stop the test server cleanly
-                if test_proc.poll() is None:
-                    test_proc.terminate()
-                    try:
-                        test_proc.wait(timeout=3)
-                    except Exception:
-                        test_proc.kill()
-
-                if server_ok:
-                    log_install(f"A2A server successfully started and responded on port {test_port} (verified /.well-known/agent.json). Stopped test instance.")
-                else:
-                    _, err_bytes = test_proc.communicate(timeout=2) if test_proc.poll() is not None else (b"", b"")
-                    err_str = (err_bytes or b"").decode("utf-8", errors="ignore")
-                    log_install(f"Warning: A2A test server did not respond or exited. Stderr: {err_str[:400]}")
-                    if test_proc.returncode not in (0, None):
-                        install_err_msg = f"A2A server exited with code {test_proc.returncode}"
-            else:
-                log_install("No runtime entrypoint defined in agent.yaml. Skipping server test launch.")
-
-            # Write ready provision state
-            state_file = os.path.join(dest_dir, ".provision_state.json")
-            state_data = {
-                "status": "ready" if not install_err_msg else "warning",
-                "slug": slug,
-                "version": target_version,
-                "plugin_id": plugin_id,
-                "install_dir": dest_dir,
-                "completed_at": datetime.now(timezone.utc).timestamp()
-            }
-            with open(state_file, "w", encoding="utf-8") as sf:
-                json.dump(state_data, sf)
-
-            log_install("Plugin installation and validation completed successfully.")
-
-        except Exception as e:
-            install_success = False
-            install_err_msg = str(e)
-            log_install(f"Installation error: {e}")
-
-        # Update database with full logs and status
-        final_logs = "\n".join(install_logs_list)
-        final_status = "ready" if install_success and not install_err_msg else ("warning" if install_success else "error")
+        # Record ready install state in marketplace DB
+        # The user's local Talos runtime/UI performs the on-device provisioning and execution.
         await marketplace_repo.update_install_status(
             user_id=current_user["id"],
             plugin_id=plugin_id,
-            status=final_status,
-            logs=final_logs,
-            error=install_err_msg
+            status="ready",
+            logs="Agent package registered. Ready for on-device execution.",
+            error=None
         )
 
     # For packaged MCP (if packaged instead of remote URL): verify zip exists
