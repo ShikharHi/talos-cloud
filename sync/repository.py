@@ -135,7 +135,7 @@ class SyncRepository:
                     "SELECT thread_id FROM snapshot_pending_deletes WHERE user_id = %s",
                     (user_id,)
                 )
-                return [row[0] for row in cur.fetchall()]
+                return [row["thread_id"] for row in cur.fetchall()]
 
     def resolve_pending_deletes(self, user_id: str, thread_ids: List[str]):
         """Remove only the specified tombstones (those confirmed in the committed snapshot)."""
