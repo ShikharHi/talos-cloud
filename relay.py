@@ -216,11 +216,53 @@ MODEL_CATALOG = {
         "default_upstream": "mistral/mistral-medium-latest",
         "fallback_upstream": "openai/gpt-4o-mini"
     },
+    "glm-5-2": {
+        "id": "glm-5-2",
+        "capabilities": ["text", "code", "tool_calling", "streaming"],
+        "default_upstream": "mistral/glm-5-2",
+        "fallback_upstream": "openai/gpt-4o-mini"
+    },
+    "zai-glm-5-3": {
+        "id": "zai-glm-5-3",
+        "capabilities": ["text", "code", "tool_calling", "streaming"],
+        "default_upstream": "mistral/zai-glm-5-3",
+        "fallback_upstream": "openai/gpt-4o-mini"
+    },
+    "glm-5-3": {
+        "id": "glm-5-3",
+        "capabilities": ["text", "code", "tool_calling", "streaming"],
+        "default_upstream": "mistral/zai-glm-5-3",
+        "fallback_upstream": "openai/gpt-4o-mini"
+    },
+    "mistral-medium-latest": {
+        "id": "mistral-medium-latest",
+        "capabilities": ["text", "general_reasoning", "tool_calling", "streaming"],
+        "default_upstream": "mistral/mistral-medium-latest",
+        "fallback_upstream": "openai/gpt-4o-mini"
+    },
+    "mistral-large-2512": {
+        "id": "mistral-large-2512",
+        "capabilities": ["text", "complex_reasoning", "code", "tool_calling", "streaming"],
+        "default_upstream": "mistral/mistral-large-2512",
+        "fallback_upstream": "openai/gpt-4o-mini"
+    },
     # Backward compatibility aliases
     "codestral-2508": {
         "id": "codestral-2508",
         "capabilities": ["text", "code", "tool_calling", "streaming"],
         "default_upstream": "mistral/codestral-2508",
+        "fallback_upstream": "openai/gpt-4o-mini"
+    },
+    "codestral-latest": {
+        "id": "codestral-latest",
+        "capabilities": ["text", "code", "tool_calling", "streaming"],
+        "default_upstream": "mistral/codestral-latest",
+        "fallback_upstream": "openai/gpt-4o-mini"
+    },
+    "mistral-small-latest": {
+        "id": "mistral-small-latest",
+        "capabilities": ["text", "code", "tool_calling", "streaming"],
+        "default_upstream": "mistral/mistral-small-latest",
         "fallback_upstream": "openai/gpt-4o-mini"
     }
 }
@@ -314,17 +356,31 @@ async def chat_completions(request: ChatCompletionRequest, raw_req: Request):
     requested_model = request.model or "talos-code"
 
     # 1. Resolve Capability Model to Vendor Upstream
-    catalog_entry = MODEL_CATALOG.get(requested_model, MODEL_CATALOG["talos-code"])
-    primary_upstream = catalog_entry["default_upstream"]
+    if requested_model in MODEL_CATALOG:
+        catalog_entry = MODEL_CATALOG[requested_model]
+        primary_upstream = catalog_entry["default_upstream"]
+    elif (
+        requested_model.startswith("glm-")
+        or requested_model.startswith("zai-")
+        or requested_model.startswith("mistral-")
+        or requested_model.startswith("codestral-")
+    ):
+        primary_upstream = f"mistral/{requested_model}"
+    else:
+        catalog_entry = MODEL_CATALOG.get("talos-code", {})
+        primary_upstream = catalog_entry.get("default_upstream", f"mistral/{requested_model}")
     
     # 2. Extract base payload without altering agent semantics
     raw_payload = request.model_dump(exclude_none=True)
     input_tokens = estimate_tokens(raw_payload.get("messages", []))
 
-    # Determine provider route
+    # Determine provider route (all Mistral and GLM models route to Mistral base URL)
     if primary_upstream.startswith("mistral") and config.MISTRAL_API_KEY and not config.MOCK_MODE:
         provider_name = "mistral"
-        upstream_model = primary_upstream.split("/")[-1]
+        upstream_model = primary_upstream.split("/", 1)[-1]
+    elif config.MISTRAL_API_KEY and not config.MOCK_MODE:
+        provider_name = "mistral"
+        upstream_model = requested_model
     elif config.OPENAI_API_KEY and not config.MOCK_MODE:
         provider_name = "openai"
         upstream_model = "gpt-4o-mini"

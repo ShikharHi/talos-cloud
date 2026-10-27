@@ -141,7 +141,7 @@ class BillingRepository:
             cur.execute("""
                 INSERT INTO billing_providers (id, name, base_url, api_key_encrypted, models, is_active, created_at, updated_at)
                 VALUES 
-                ('mistral', 'Mistral AI', %s, %s, '["codestral-2508", "mistral-medium-latest"]'::jsonb, TRUE, %s, %s),
+                ('mistral', 'Mistral AI', %s, %s, '["codestral-2508", "mistral-medium-latest", "mistral-large-2512", "glm-5-2", "zai-glm-5-3"]'::jsonb, TRUE, %s, %s),
                 ('openai', 'OpenAI', %s, %s, '["gpt-4o-mini"]'::jsonb, TRUE, %s, %s)
             """, (config.MISTRAL_BASE_URL, m_key_enc, now, now, config.OPENAI_BASE_URL, o_key_enc, now, now))
 
@@ -151,10 +151,14 @@ class BillingRepository:
                 (id, resource_id, provider_type, provider_id, pricing_version, input_rate_usd, output_rate_usd, cached_rate_usd, tool_call_rate_usd, credit_multiplier, effective_from, effective_to, is_active)
                 VALUES 
                 ('prc_codestral_v1', 'codestral-2508', 'llm_provider', 'mistral', 'v2026.10.1', 0.30, 0.90, 0.03, 0.0, 1.0, %s, NULL, TRUE),
+                ('prc_mistral_med_v1', 'mistral-medium-latest', 'llm_provider', 'mistral', 'v2026.10.1', 0.40, 1.20, 0.04, 0.0, 1.0, %s, NULL, TRUE),
+                ('prc_mistral_large_v1', 'mistral-large-2512', 'llm_provider', 'mistral', 'v2026.10.1', 0.80, 2.40, 0.08, 0.0, 1.0, %s, NULL, TRUE),
+                ('prc_glm52_v1', 'glm-5-2', 'llm_provider', 'mistral', 'v2026.10.1', 0.35, 1.05, 0.035, 0.0, 1.0, %s, NULL, TRUE),
+                ('prc_zaiglm53_v1', 'zai-glm-5-3', 'llm_provider', 'mistral', 'v2026.10.1', 0.50, 1.50, 0.05, 0.0, 1.0, %s, NULL, TRUE),
                 ('prc_gpt4omini_v1', 'gpt-4o-mini', 'llm_provider', 'openai', 'v2026.10.1', 0.15, 0.60, 0.075, 0.0, 1.0, %s, NULL, TRUE),
                 ('prc_tavily_basic_v1', 'tavily/search-basic', 'system_tool', NULL, 'v2026.10.1', 0.0, 0.0, 0.0, 0.0075, 1.0, %s, NULL, TRUE),
                 ('prc_tavily_adv_v1', 'tavily/search-advanced', 'system_tool', NULL, 'v2026.10.1', 0.0, 0.0, 0.0, 0.0150, 1.0, %s, NULL, TRUE)
-            """, (now, now, now, now))
+            """, (now, now, now, now, now, now, now, now))
 
     async def get_active_pricing(self, resource_id: str) -> Optional[Dict[str, Any]]:
         """Fetch the current effective pricing row for a resource."""
