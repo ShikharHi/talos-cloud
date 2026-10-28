@@ -314,6 +314,19 @@ async def parse_and_sequence_sse(
     sequence_id = 0
     buffer = ""
     ttft_marked = False
+    saw_data = False
+    saw_done = False
+
+    def validate_data(data_part: str) -> None:
+        if data_part == "[DONE]":
+            return
+        try:
+            payload = json.loads(data_part)
+        except json.JSONDecodeError as exc:
+            clean = clean_upstream_error_text(data_part)
+            raise RuntimeError(f"Upstream returned a non-JSON SSE response: {clean}") from exc
+        if not isinstance(payload, dict) or "choices" not in payload:
+            raise RuntimeError("Upstream returned an invalid chat-completion stream event.")
 
     async for chunk in upstream_stream:
         buffer += chunk.decode("utf-8", errors="replace")
@@ -325,11 +338,14 @@ async def parse_and_sequence_sse(
             if not line:
                 continue
 
-            if line.startswith("data: "):
-                data_part = line[6:].strip()
+            if line.startswith("data:"):
+                data_part = line[5:].strip()
+                validate_data(data_part)
+                saw_data = True
                 
                 # Check for stream completion
                 if data_part == "[DONE]":
+                    saw_done = True
                     yield f"id: {sequence_id}\nevent: done\ndata: [DONE]\n\n"
                     return
 
@@ -342,13 +358,21 @@ async def parse_and_sequence_sse(
                 yield f"id: {sequence_id}\nevent: message\ndata: {data_part}\n\n"
 
     # Flush remaining buffer if present
-    if buffer.strip() and buffer.strip().startswith("data: "):
+    if buffer.strip() and buffer.strip().startswith("data:"):
         sequence_id += 1
-        data_part = buffer.strip()[6:].strip()
+        data_part = buffer.strip()[5:].strip()
+        validate_data(data_part)
+        saw_data = True
         if data_part == "[DONE]":
+            saw_done = True
             yield f"id: {sequence_id}\nevent: done\ndata: [DONE]\n\n"
         else:
             yield f"id: {sequence_id}\nevent: message\ndata: {data_part}\n\n"
+
+    if not saw_data:
+        raise RuntimeError("Upstream closed without a valid chat-completion stream; it may have returned a WAF page.")
+    if not saw_done:
+        raise RuntimeError("Upstream ended the chat-completion stream without its completion marker.")
 
 # ---------------------------------------------------------------------------
 # Error Sanitizer for Upstream WAF / Gateways
@@ -454,7 +478,6 @@ async def chat_completions(request: ChatCompletionRequest, raw_req: Request):
                             json=vendor_payload
                         ) as upstream_resp:
                             if upstream_resp.status_code == 200:
-                                success = True
                                 async for formatted_sse in parse_and_sequence_sse(
                                     upstream_resp.aiter_bytes(),
                                     request_id,
@@ -462,6 +485,7 @@ async def chat_completions(request: ChatCompletionRequest, raw_req: Request):
                                 ):
                                     output_tokens += 1
                                     yield formatted_sse
+                                success = True
                             else:
                                 err_content = await upstream_resp.aread()
                                 raw_err = err_content.decode('utf-8', errors='ignore')
@@ -483,8 +507,6 @@ async def chat_completions(request: ChatCompletionRequest, raw_req: Request):
                                             json=openai_payload
                                         ) as fb_resp:
                                             if fb_resp.status_code == 200:
-                                                success = True
-                                                failover_attempted = True
                                                 async for formatted_sse in parse_and_sequence_sse(
                                                     fb_resp.aiter_bytes(),
                                                     request_id,
@@ -492,10 +514,52 @@ async def chat_completions(request: ChatCompletionRequest, raw_req: Request):
                                                 ):
                                                     output_tokens += 1
                                                     yield formatted_sse
+                                                success = True
+                                                failover_attempted = True
                                     except Exception as fb_exc:
                                         error_msg += f" | Secondary failover error: {str(fb_exc)}"
                 except Exception as exc:
                     error_msg = f"Upstream Network Error: {str(exc)}"
+                    # Fail over on connection-level failures too. Previously the
+                    # secondary provider was only tried when Mistral returned a
+                    # non-200 response, so DNS/TLS/WAF exceptions skipped it.
+                    # Do not replay after yielding partial output to avoid
+                    # duplicating a response the client has already received.
+                    if output_tokens == 0 and config.OPENAI_API_KEY:
+                        try:
+                            openai_payload = normalize_provider_payload(raw_payload, "openai")
+                            openai_payload["model"] = "gpt-4o-mini"
+                            openai_headers = {
+                                "Authorization": f"Bearer {config.OPENAI_API_KEY}",
+                                "Content-Type": "application/json"
+                            }
+                            async with httpx.AsyncClient(timeout=120.0) as fallback_client:
+                                async with fallback_client.stream(
+                                    "POST",
+                                    f"{config.OPENAI_BASE_URL}/chat/completions",
+                                    headers=openai_headers,
+                                    json=openai_payload
+                                ) as fb_resp:
+                                    if fb_resp.status_code == 200:
+                                        async for formatted_sse in parse_and_sequence_sse(
+                                            fb_resp.aiter_bytes(),
+                                            request_id,
+                                            on_first_token=record_ttft
+                                        ):
+                                            output_tokens += 1
+                                            yield formatted_sse
+                                        success = True
+                                        failover_attempted = True
+                                        error_msg = None
+                                    else:
+                                        fb_error = await fb_resp.aread()
+                                        fb_text = fb_error.decode("utf-8", errors="ignore")
+                                        error_msg += (
+                                            f" | OpenAI fallback HTTP {fb_resp.status_code}: "
+                                            f"{clean_upstream_error_text(fb_text, fb_resp.status_code)}"
+                                        )
+                        except Exception as fb_exc:
+                            error_msg += f" | Secondary failover error: {str(fb_exc)}"
                 finally:
                     duration_ms = (time.time() - start_time) * 1000
                     status = "completed" if success else "failed"
