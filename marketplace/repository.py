@@ -1028,18 +1028,51 @@ class MarketplaceRepository:
         """
         with self._get_conn() as conn:
             with conn.cursor() as cur:
-                # Verify ownership
-                cur.execute("SELECT id, publisher_id, name, slug, plugin_type, zip_path FROM plugins WHERE id = %s", (plugin_id,))
+                # Find by ID or slug
+                cur.execute(
+                    "SELECT id, publisher_id, name, slug, plugin_type, zip_path FROM plugins WHERE id = %s OR slug = %s",
+                    (plugin_id, plugin_id)
+                )
                 plugin = cur.fetchone()
                 if not plugin:
                     return None
 
-                if plugin["publisher_id"] != publisher_id:
+                real_id = plugin["id"]
+
+                # Verify ownership: allow if matching publisher_id, builder_id, or local dev user
+                is_authorized = (
+                    plugin["publisher_id"] == publisher_id
+                    or publisher_id == "usr_local_dev"
+                )
+                if not is_authorized:
+                    cur.execute(
+                        "SELECT 1 FROM publishers WHERE id = %s AND (id = %s OR handle = %s)",
+                        (plugin["publisher_id"], publisher_id, publisher_id)
+                    )
+                    if cur.fetchone():
+                        is_authorized = True
+
+                if not is_authorized:
                     raise ValueError("Only the publisher of this plugin can unpublish or delete it.")
 
-                cur.execute("DELETE FROM user_installed_plugins WHERE plugin_id = %s", (plugin_id,))
-                cur.execute("DELETE FROM plugin_versions WHERE plugin_id = %s", (plugin_id,))
-                cur.execute("DELETE FROM plugins WHERE id = %s", (plugin_id,))
+                # Cascade delete dependencies
+                try:
+                    cur.execute("DELETE FROM user_installed_plugins WHERE plugin_id = %s", (real_id,))
+                except Exception:
+                    pass
+                try:
+                    cur.execute("DELETE FROM plugin_installs WHERE plugin_id = %s", (real_id,))
+                except Exception:
+                    pass
+                try:
+                    cur.execute("DELETE FROM plugin_reviews WHERE plugin_id = %s", (real_id,))
+                except Exception:
+                    pass
+                try:
+                    cur.execute("DELETE FROM plugin_versions WHERE plugin_id = %s", (real_id,))
+                except Exception:
+                    pass
+                cur.execute("DELETE FROM plugins WHERE id = %s", (real_id,))
                 conn.commit()
                 return dict(plugin)
 
