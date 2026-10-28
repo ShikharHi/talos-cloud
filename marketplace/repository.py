@@ -92,7 +92,7 @@ class MarketplaceRepository:
                         slug TEXT NOT NULL,
                         name TEXT NOT NULL,
                         description TEXT NOT NULL,
-                        plugin_type TEXT NOT NULL CHECK(plugin_type IN ('skill','agent','mcp')),
+                        plugin_type TEXT NOT NULL CHECK(plugin_type IN ('skill','mcp')),
                         publisher_id TEXT NOT NULL REFERENCES publishers(id) ON DELETE CASCADE,
                         latest_version TEXT DEFAULT '1.0.0',
                         icon_url TEXT,
@@ -192,7 +192,7 @@ class MarketplaceRepository:
                 cur.execute("""
                     ALTER TABLE plugins
                         ADD COLUMN IF NOT EXISTS builder_id TEXT REFERENCES builders(id),
-                        ADD COLUMN IF NOT EXISTS category TEXT DEFAULT 'agents',
+                        ADD COLUMN IF NOT EXISTS category TEXT DEFAULT 'skills',
                         ADD COLUMN IF NOT EXISTS short_desc TEXT,
                         ADD COLUMN IF NOT EXISTS long_desc_md TEXT,
                         ADD COLUMN IF NOT EXISTS requirements TEXT,
@@ -747,8 +747,8 @@ class MarketplaceRepository:
                     ptype = p_dict.get("plugin_type")
                     zp = p_dict.get("zip_path")
 
-                    # For skills and packaged agents: verify the physical zip artifact exists on disk or in Tigris object storage
-                    if ptype in ("skill", "agent"):
+                    # For skills: verify the physical zip artifact exists on disk or in Tigris object storage
+                    if ptype == "skill":
                         if not zp:
                             continue
                         if not zp.startswith("tigris://") and not os.path.exists(zp):
@@ -842,7 +842,7 @@ class MarketplaceRepository:
                         json.dumps(configuration_schema or []),
                         json.dumps(capabilities_snapshot or {}),
                         endpoint_url, zip_path,
-                        category or "agents", short_desc or description[:160]
+                        category or "skills", short_desc or description[:160]
                     ))
 
                 # Insert version record

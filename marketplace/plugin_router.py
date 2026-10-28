@@ -23,15 +23,8 @@ from config import config
 
 router = APIRouter(prefix="/v1/marketplace", tags=["Plugin Marketplace"])
 
-STORAGE_AGENTS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "storage", "agents"))
 STORAGE_MCP_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "storage", "mcp"))
-os.makedirs(STORAGE_AGENTS_DIR, exist_ok=True)
 os.makedirs(STORAGE_MCP_DIR, exist_ok=True)
-
-# Max ZIP sizes
-MAX_AGENT_ZIP_BYTES = 100 * 1024 * 1024   # 100 MB
-MAX_AGENT_UNCOMPRESSED = 500 * 1024 * 1024  # 500 MB
-MAX_AGENT_ENTRIES = 2000
 
 
 async def get_current_user_required(request: Request) -> Dict[str, Any]:
@@ -57,126 +50,6 @@ async def get_current_user_required(request: Request) -> Dict[str, Any]:
             """)
             conn.commit()
             return {"id": "usr_local_dev", "email": "shikhar@talos.dev", "display_name": "Shikhar"}
-
-
-def validate_agent_zip(zip_path: str) -> Dict[str, Any]:
-    """
-    Validate an uploaded agent ZIP:
-    - ZIP safety (path traversal, size, entry count)
-    - agent.yaml presence and required fields
-    - Talos-compatible LLM config (BASE_URL + API_KEY)
-    - A2A configuration presence
-    - Entrypoint declared
-    Returns: parsed manifest dict on success, raises HTTPException on failure
-    """
-    if not zipfile.is_zipfile(zip_path):
-        raise HTTPException(status_code=400, detail="Uploaded file is not a valid ZIP archive")
-
-    total_uncompressed = 0
-    entry_count = 0
-    agent_yaml_content = None
-
-    with zipfile.ZipFile(zip_path, 'r') as zf:
-        entries = zf.infolist()
-        for entry in entries:
-            # Path traversal check
-            if ".." in entry.filename or entry.filename.startswith("/") or entry.filename.startswith("\\"):
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Security: path traversal detected in entry '{entry.filename}'"
-                )
-            total_uncompressed += entry.file_size
-            entry_count += 1
-
-        if entry_count > MAX_AGENT_ENTRIES:
-            raise HTTPException(
-                status_code=400,
-                detail=f"ZIP contains too many entries ({entry_count} > {MAX_AGENT_ENTRIES})"
-            )
-        if total_uncompressed > MAX_AGENT_UNCOMPRESSED:
-            raise HTTPException(status_code=400, detail="ZIP uncompressed content exceeds 500 MB limit")
-
-        # Find agent.yaml (may be inside a single root folder)
-        yaml_names = [n for n in zf.namelist() if n.lower().endswith("agent.yaml")]
-        if not yaml_names:
-            raise HTTPException(
-                status_code=400,
-                detail="Missing agent.yaml: every A2A agent package must include agent.yaml"
-            )
-
-        # Prefer root-level or shortest path
-        yaml_names.sort(key=lambda x: x.count("/"))
-        agent_yaml_content = zf.read(yaml_names[0]).decode("utf-8", errors="ignore")
-
-    # Parse YAML
-    try:
-        manifest = yaml.safe_load(agent_yaml_content)
-        if not isinstance(manifest, dict):
-            raise ValueError("agent.yaml must be a YAML mapping")
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"agent.yaml parse error: {e}")
-
-    # Required top-level fields
-    required_fields = ["name", "version", "description", "runtime"]
-    for field in required_fields:
-        if not manifest.get(field):
-            raise HTTPException(status_code=400, detail=f"agent.yaml missing required field: '{field}'")
-
-    # Runtime check
-    runtime = manifest.get("runtime", {})
-    if not isinstance(runtime, dict) or not runtime.get("entrypoint"):
-        raise HTTPException(
-            status_code=400,
-            detail="agent.yaml runtime.entrypoint is required (e.g. 'app.main:run')"
-        )
-
-    # A2A section check
-    a2a = manifest.get("a2a")
-    if not a2a or not isinstance(a2a, dict):
-        raise HTTPException(
-            status_code=400,
-            detail="agent.yaml missing 'a2a' section (A2A protocol configuration required)"
-        )
-
-    # LLM compatibility (Talos relay via BASE_URL + API_KEY)
-    llm = manifest.get("llm", {})
-    env_vars = manifest.get("environment", [])
-    env_names = [e.get("name") for e in env_vars if isinstance(e, dict)]
-
-    if llm.get("openai_compatible"):
-        base_url_env = llm.get("base_url_env", "BASE_URL")
-        api_key_env = llm.get("api_key_env", "API_KEY")
-        if base_url_env not in env_names:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"agent.yaml: LLM base_url_env '{base_url_env}' must be declared in "
-                    "environment[] for Talos relay compatibility"
-                )
-            )
-        if api_key_env not in env_names:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"agent.yaml: LLM api_key_env '{api_key_env}' must be declared in "
-                    "environment[] for Talos relay compatibility"
-                )
-            )
-
-    # Extract configuration_schema from environment
-    configuration_schema = [
-        e for e in env_vars
-        if isinstance(e, dict) and e.get("managed_by") == "user"
-    ]
-
-    return {
-        "manifest": manifest,
-        "name": manifest["name"],
-        "version": manifest["version"],
-        "description": manifest["description"],
-        "runtime": runtime,
-        "configuration_schema": configuration_schema,
-    }
 
 
 async def probe_mcp_endpoint(endpoint: str, auth_header: Optional[str] = None) -> Dict[str, Any]:
@@ -461,7 +334,7 @@ async def probe_mcp_endpoint(endpoint: str, auth_header: Optional[str] = None) -
 
 @router.get("/plugins")
 async def list_plugins(
-    type: Optional[str] = Query(None, description="Filter: skill, agent, mcp, or all"),
+    type: Optional[str] = Query(None, description="Filter: skill, mcp, or all"),
     query: Optional[str] = Query(None),
     sort: str = Query("popular"),
     request: Request = None,
@@ -547,122 +420,6 @@ async def publish_skill_plugin(
         "success": True,
         "plugin": result,
         "message": "Skill published. Use Install to add it to your PC.",
-    }
-
-
-@router.post("/publish/agent")
-async def publish_agent_plugin(
-    file: UploadFile = File(...),
-    inspect_only: Optional[bool] = Form(False, alias="_inspect_only"),
-    changelog: Optional[str] = Form("Initial release"),
-    category: Optional[str] = Form("AI Agents"),
-    tags: Optional[str] = Form(None),
-    short_desc: Optional[str] = Form(None),
-    current_user: Dict[str, Any] = Depends(get_current_user_required),
-):
-    """
-    Publish an A2A sub-agent package ZIP or inspect its contents for wizard preview.
-    Validates: ZIP safety, agent.yaml structure, A2A section, Talos relay compatibility.
-    Does NOT auto-install.
-    """
-    file_bytes = await file.read()
-    if not file_bytes:
-        raise HTTPException(status_code=400, detail="File cannot be empty")
-    if len(file_bytes) > MAX_AGENT_ZIP_BYTES:
-        raise HTTPException(status_code=400, detail="ZIP exceeds 100 MB limit")
-
-    artifact_sha256 = hashlib.sha256(file_bytes).hexdigest()
-    temp_zip = os.path.join(STORAGE_AGENTS_DIR, f"upload_{artifact_sha256[:16]}.zip")
-    with open(temp_zip, "wb") as f:
-        f.write(file_bytes)
-
-    try:
-        validated = validate_agent_zip(temp_zip)
-    except HTTPException:
-        os.remove(temp_zip)
-        raise
-
-    manifest = validated["manifest"]
-
-    # If caller requested inspection only (for wizard live preview and checklist), return extracted manifest
-    if inspect_only:
-        try:
-            os.remove(temp_zip)
-        except Exception:
-            pass
-        return {
-            "success": True,
-            "manifest": manifest,
-            "name": manifest.get("name"),
-            "version": validated.get("version"),
-            "description": manifest.get("description"),
-            "runtime": validated.get("runtime"),
-            "artifact_sha256": artifact_sha256,
-            "artifact_size": len(file_bytes),
-            "configuration_schema": validated.get("configuration_schema", []),
-            "checklist": {
-                "agent_yaml": True,
-                "semver": bool(validated.get("version")),
-                "runtime": bool(validated.get("runtime")),
-                "entrypoint": bool(validated.get("runtime", {}).get("entrypoint")),
-                "a2a": bool(manifest.get("a2a")),
-                "environment_vars": [e.get("name") for e in manifest.get("environment", []) if isinstance(e, dict)],
-            }
-        }
-
-    slug = re.sub(r'[^a-zA-Z0-9_\-]', '-', manifest["name"].lower()).strip('-')
-    slug = re.sub(r'-+', '-', slug) or "agent"
-    version = validated["version"]
-    final_zip = os.path.join(STORAGE_AGENTS_DIR, f"{slug}_{artifact_sha256[:8]}.zip")
-    os.rename(temp_zip, final_zip)
-
-    author_handle = re.sub(
-        r'[^a-zA-Z0-9_\-]', '',
-        (current_user.get("email", "").split("@")[0] or "user").lower()
-    )
-    publisher_id = await marketplace_repo.get_or_create_publisher(
-        user_id=current_user["id"],
-        handle=author_handle,
-        display_name=current_user.get("display_name") or author_handle,
-    )
-
-    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
-
-    # Upload to Tigris Object Storage
-    from marketplace.tigris_service import tigris_service
-    tigris_key = f"agents/{slug}/{version}/{os.path.basename(final_zip)}"
-    tigris_uri = None
-    try:
-        tigris_uri = tigris_service.upload_file(final_zip, tigris_key)
-        print(f"[Marketplace] Uploaded agent package to Tigris: {tigris_uri}")
-    except Exception as e:
-        print(f"[Marketplace] Tigris upload warning: {e}")
-
-    result = await marketplace_repo.publish_plugin(
-        publisher_id=publisher_id,
-        slug=slug,
-        name=manifest["name"],
-        description=manifest["description"],
-        plugin_type="agent",
-        version=version,
-        zip_path=tigris_uri or final_zip,
-        artifact_sha256=artifact_sha256,
-        manifest=manifest,
-        configuration_schema=validated["configuration_schema"],
-        changelog=changelog or "Initial release",
-        category=category or "AI Agents",
-        short_desc=short_desc or manifest["description"][:160],
-        tags=tag_list,
-    )
-    return {
-        "success": True,
-        "plugin": result,
-        "validation": {
-            "a2a": True,
-            "relay_compatible": True,
-            "user_config_fields": validated["configuration_schema"],
-        },
-        "message": "Agent published. Users must click Install to provision it locally.",
     }
 
 
@@ -811,47 +568,6 @@ async def create_install_session(
             "installed_path": dest,
         }
 
-    # For packaged agents: install in user profile and extract locally
-    if plugin["plugin_type"] == "agent":
-        zip_path = (ver_record and ver_record.get("zip_path")) or plugin.get("zip_path")
-        if not zip_path:
-            raise HTTPException(status_code=404, detail="Agent package artifact ZIP is missing from storage. Cannot install.")
-
-        temp_agent_zip = None
-        if zip_path.startswith("tigris://"):
-            from marketplace.tigris_service import tigris_service
-            import tempfile
-            object_key = zip_path.replace(f"tigris://{config.TIGRIS_BUCKET}/", "").lstrip("/")
-            file_data = tigris_service.get_object_bytes(object_key)
-            if not file_data:
-                raise HTTPException(status_code=404, detail="Artifact not found in Tigris object storage.")
-            temp_f = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
-            temp_f.write(file_data)
-            temp_f.close()
-            temp_agent_zip = temp_f.name
-            zip_path = temp_agent_zip
-        elif not os.path.exists(zip_path):
-            raise HTTPException(status_code=404, detail="Agent package artifact ZIP is missing from storage. Cannot install.")
-
-        await marketplace_repo.install_plugin(current_user["id"], plugin_id, plugin_version_id=plugin_version_id)
-        slug = plugin["slug"]
-        # Clean up temporary downloaded archive if created
-        if temp_agent_zip and os.path.exists(temp_agent_zip):
-            try:
-                os.remove(temp_agent_zip)
-            except Exception:
-                pass
-
-        # Record ready install state in marketplace DB
-        # The user's local Talos runtime/UI performs the on-device provisioning and execution.
-        await marketplace_repo.update_install_status(
-            user_id=current_user["id"],
-            plugin_id=plugin_id,
-            status="ready",
-            logs="Agent package registered. Ready for on-device execution.",
-            error=None
-        )
-
     # For packaged MCP (if packaged instead of remote URL): verify zip exists
     if plugin["plugin_type"] == "mcp":
         zip_path = plugin.get("zip_path")
@@ -865,7 +581,7 @@ async def create_install_session(
     if plugin["plugin_type"] == "mcp":
         await marketplace_repo.install_plugin(current_user["id"], plugin_id, plugin_version_id=plugin_version_id)
 
-    # For agents/mcp: return session so local provisioner can handle
+    # For MCP: return session so local client can handle
     session_token = secrets.token_urlsafe(32)
     return {
         "plugin_id": plugin_id,
@@ -1058,16 +774,7 @@ async def uninstall_plugin(
                 except Exception:
                     pass
 
-        # 2. Clean up agent package files in ~/.talos/packages/agents/<slug>
-        if ptype == "agent" and slug:
-            agent_dir = os.path.join(user_home, ".talos", "packages", "agents", slug)
-            if os.path.exists(agent_dir):
-                try:
-                    shutil.rmtree(agent_dir)
-                except Exception:
-                    pass
-
-        # 3. Clean up stored credentials / secrets metadata for mcp or other plugins
+        # 2. Clean up stored credentials / secrets metadata for mcp or other plugins
         try:
             meta_path = os.path.join(user_home, ".talos", "plugin_config_meta.json")
             if os.path.exists(meta_path):
@@ -1129,8 +836,6 @@ async def unpublish_plugin(
     if slug:
         if ptype == "skill":
             storage_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "storage", "skills"))
-        elif ptype == "agent":
-            storage_dir = STORAGE_AGENTS_DIR
         else:
             storage_dir = STORAGE_MCP_DIR
         named_zip = os.path.join(storage_dir, f"{slug}.zip")
@@ -1146,13 +851,6 @@ async def unpublish_plugin(
             if os.path.exists(local_skill_dir):
                 try:
                     shutil.rmtree(local_skill_dir)
-                except Exception:
-                    pass
-        elif ptype == "agent":
-            local_agent_dir = os.path.join(user_home, ".talos", "packages", "agents", slug)
-            if os.path.exists(local_agent_dir):
-                try:
-                    shutil.rmtree(local_agent_dir)
                 except Exception:
                     pass
 
