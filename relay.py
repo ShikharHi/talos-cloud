@@ -346,6 +346,32 @@ async def parse_and_sequence_sse(
             yield f"id: {sequence_id}\nevent: message\ndata: {data_part}\n\n"
 
 # ---------------------------------------------------------------------------
+# Error Sanitizer for Upstream WAF / Gateways
+# ---------------------------------------------------------------------------
+def clean_upstream_error_text(raw_text: str, status_code: Optional[int] = None) -> str:
+    """Sanitize any raw HTML or WAF responses from upstream LLM vendors into clean text."""
+    if not raw_text:
+        return f"Upstream error HTTP {status_code or 500}"
+    is_html = (
+        "<!doctype html" in raw_text.lower()
+        or "<html" in raw_text.lower()
+        or "<title>blocked</title>" in raw_text.lower()
+        or "<title>just a moment...</title>" in raw_text.lower()
+    )
+    if is_html:
+        import re
+        title_match = re.search(r"<title>(.*?)</title>", raw_text, re.IGNORECASE | re.DOTALL)
+        title = title_match.group(1).strip() if title_match else "Access Blocked"
+        code = status_code or 403
+        return f"Upstream WAF/Security Block (HTTP {code}: {title}) - Security Challenge Triggered"
+    
+    import re
+    cleaned = re.sub(r"<[^>]+>", "", raw_text).strip()
+    if len(cleaned) > 300:
+        cleaned = cleaned[:297] + "..."
+    return cleaned or f"Upstream HTTP {status_code or 500}"
+
+# ---------------------------------------------------------------------------
 # Main Relay Execution Endpoint
 # ---------------------------------------------------------------------------
 @router.post("/chat/completions")
@@ -433,7 +459,8 @@ async def chat_completions(request: ChatCompletionRequest, raw_req: Request):
                                     yield formatted_sse
                             else:
                                 err_content = await upstream_resp.aread()
-                                error_msg = f"Mistral HTTP {upstream_resp.status_code}: {err_content.decode('utf-8', errors='ignore')}"
+                                raw_err = err_content.decode('utf-8', errors='ignore')
+                                error_msg = f"Mistral HTTP {upstream_resp.status_code}: {clean_upstream_error_text(raw_err, upstream_resp.status_code)}"
                 except Exception as exc:
                     error_msg = f"Upstream Network Error: {str(exc)}"
                 finally:
@@ -542,6 +569,7 @@ async def chat_completions(request: ChatCompletionRequest, raw_req: Request):
                         ))
                         return data
                     else:
+                        clean_err = clean_upstream_error_text(resp.text, resp.status_code)
                         telemetry.record(UsageRecord(
                             request_id=request_id,
                             timestamp=time.time(),
@@ -552,9 +580,9 @@ async def chat_completions(request: ChatCompletionRequest, raw_req: Request):
                             output_tokens=0,
                             latency_ms=duration_ms,
                             status="failed",
-                            error=resp.text
+                            error=clean_err
                         ))
-                        raise HTTPException(status_code=resp.status_code, detail=resp.text)
+                        raise HTTPException(status_code=resp.status_code, detail=clean_err)
             except Exception as exc:
                 duration_ms = (time.time() - start_time) * 1000
                 telemetry.record(UsageRecord(

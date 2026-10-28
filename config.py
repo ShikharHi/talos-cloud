@@ -22,6 +22,10 @@ class Config(BaseModel):
     # Enable mock mode if no real key provided
     MOCK_MODE: bool = os.getenv("TALOS_MOCK_MODE", "false").lower() in ("true", "1", "yes")
 
+    # Compatibility paths for cross-module test fixtures
+    TALOS_CHECKPOINTS_PATH: str = os.getenv("TALOS_CHECKPOINTS_PATH", "")
+    TALOS_DB_PATH: str = os.getenv("TALOS_DB_PATH", "")
+
     # PostgreSQL Connection URL (Neon Cloud Postgres)
     POSTGRES_URL: str = os.getenv(
         "TALOS_POSTGRES_URL",
