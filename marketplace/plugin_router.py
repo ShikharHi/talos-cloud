@@ -359,6 +359,7 @@ class GitHubPackageRequest(BaseModel):
     repo: str
     branch: Optional[str] = "main"
     path: Optional[str] = ""
+    subpath: Optional[str] = ""
     token: Optional[str] = None
 
 
@@ -367,6 +368,7 @@ class GitHubInstallLocalRequest(BaseModel):
     repo: str
     branch: Optional[str] = "main"
     path: Optional[str] = ""
+    subpath: Optional[str] = ""
     token: Optional[str] = None
     slug: Optional[str] = None
 
@@ -402,7 +404,7 @@ async def package_github_skill_endpoint(
             owner=payload.owner,
             repo=payload.repo,
             branch=payload.branch or "main",
-            subpath=payload.path or "",
+            subpath=(payload.path or payload.subpath or "").strip("/"),
             github_token=payload.token,
         )
         return Response(
@@ -434,7 +436,7 @@ async def install_github_skill_local(
             owner=payload.owner,
             repo=payload.repo,
             branch=payload.branch or "main",
-            subpath=payload.path or "",
+            subpath=(payload.path or payload.subpath or "").strip("/"),
             github_token=payload.token,
         )
 

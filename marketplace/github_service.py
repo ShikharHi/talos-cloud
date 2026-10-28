@@ -228,73 +228,102 @@ async def package_github_skill(
     """
     Download repository archive from GitHub, extract the target subfolder,
     and package it into a clean standard ZIP archive with SKILL.md at the root.
+    Uses fast Git Tree API + raw file fetching for isolated subfolders,
+    preventing entire-repo bloat and eliminating false positive security warnings.
     Returns (zip_bytes, suggested_slug).
     """
-    subpath = subpath.strip("/")
+    subpath = subpath.strip("/").replace("\\", "/")
+    suggested_slug = os.path.basename(subpath) if subpath and subpath != "." else repo.lower().replace(".", "-")
     headers = {
         "User-Agent": "Talos-Agent-Skill-Importer/1.0",
+        "Accept": "application/vnd.github.v3+json",
     }
     if github_token:
         headers["Authorization"] = f"token {github_token}"
 
-    tarball_url = f"https://api.github.com/repos/{owner}/{repo}/tarball/{branch}"
+    async with httpx.AsyncClient(headers=headers, timeout=30.0, follow_redirects=True) as client:
+        # 1. Fast path: Fetch Git Tree to locate exact files within subpath
+        tree_url = f"https://api.github.com/repos/{owner}/{repo}/git/trees/{branch}?recursive=1"
+        resp = await client.get(tree_url)
 
-    async with httpx.AsyncClient(headers=headers, timeout=60.0, follow_redirects=True) as client:
+        if resp.status_code == 200:
+            tree_data = resp.json()
+            items = tree_data.get("tree", [])
+
+            # Match blobs inside subpath
+            prefix = f"{subpath}/" if subpath else ""
+            skill_blobs = [
+                item["path"] for item in items
+                if item.get("type") == "blob" and (
+                    not prefix or item["path"].startswith(prefix) or item["path"] == subpath
+                )
+            ]
+
+            if skill_blobs:
+                # Cap file count to avoid runaway monorepos if subpath was accidentally root
+                if not prefix and len(skill_blobs) > 100:
+                    skill_blobs = [p for p in skill_blobs if "/" not in p or p.startswith("scripts/") or p.startswith("references/")]
+
+                sem = asyncio.Semaphore(15)
+
+                async def fetch_blob(path_str: str) -> Tuple[str, bytes]:
+                    async with sem:
+                        raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path_str}"
+                        try:
+                            r = await client.get(raw_url, timeout=15.0)
+                            return path_str, (r.content if r.status_code == 200 else b"")
+                        except Exception:
+                            return path_str, b""
+
+                blob_results = await asyncio.gather(*(fetch_blob(p) for p in skill_blobs))
+
+                out_buf = io.BytesIO()
+                with zipfile.ZipFile(out_buf, "w", zipfile.ZIP_DEFLATED) as out_zip:
+                    for orig_path, content in blob_results:
+                        if not content:
+                            continue
+                        if prefix and orig_path.startswith(prefix):
+                            rel_path = orig_path[len(prefix):]
+                        else:
+                            rel_path = os.path.basename(orig_path)
+
+                        if rel_path:
+                            out_zip.writestr(rel_path, content)
+
+                return out_buf.getvalue(), suggested_slug
+
+        # 2. Fallback: Tarball slicing
+        tarball_url = f"https://api.github.com/repos/{owner}/{repo}/tarball/{branch}"
         resp = await client.get(tarball_url)
-        if resp.status_code != 200:
-            # Fallback to direct codeload zip
-            zip_fallback_url = f"https://github.com/{owner}/{repo}/archive/refs/heads/{branch}.zip"
-            resp = await client.get(zip_fallback_url)
-            if resp.status_code != 200:
-                raise ValueError(f"Failed to download repository archive from GitHub: HTTP {resp.status_code}")
-
-            # Extract from ZIP
-            in_zip = zipfile.ZipFile(io.BytesIO(resp.content))
-            names = in_zip.namelist()
-            root_prefix = names[0].split("/")[0] if names else ""
+        if resp.status_code == 200:
+            tar = tarfile.open(fileobj=io.BytesIO(resp.content), mode="r:gz")
+            members = tar.getmembers()
+            root_prefix = members[0].name.split("/")[0] if members else ""
             target_prefix = f"{root_prefix}/{subpath}/".rstrip("/") + "/" if subpath else f"{root_prefix}/"
+
+            matching_members = [
+                m for m in members
+                if m.isfile() and m.name.startswith(target_prefix)
+            ]
+
+            if not matching_members and subpath:
+                matching_members = [
+                    m for m in members
+                    if m.isfile() and (f"/{subpath}/" in m.name or m.name.endswith(f"/{subpath}"))
+                ]
+                if matching_members:
+                    first_name = matching_members[0].name
+                    target_prefix = first_name.split(subpath)[0] + subpath + "/"
 
             out_buf = io.BytesIO()
             with zipfile.ZipFile(out_buf, "w", zipfile.ZIP_DEFLATED) as out_zip:
-                for name in names:
-                    if name.startswith(target_prefix) and not name.endswith("/"):
-                        rel_path = name[len(target_prefix):]
+                for m in matching_members:
+                    f = tar.extractfile(m)
+                    if f:
+                        rel_path = m.name[len(target_prefix):]
                         if rel_path:
-                            out_zip.writestr(rel_path, in_zip.read(name))
+                            out_zip.writestr(rel_path, f.read())
 
-            suggested_slug = os.path.basename(subpath) if subpath else repo
             return out_buf.getvalue(), suggested_slug
 
-        # Extract from TARBALL (gz)
-        tar = tarfile.open(fileobj=io.BytesIO(resp.content), mode="r:gz")
-        members = tar.getmembers()
-
-        root_prefix = members[0].name.split("/")[0] if members else ""
-        target_prefix = f"{root_prefix}/{subpath}/".rstrip("/") + "/" if subpath else f"{root_prefix}/"
-
-        matching_members = [
-            m for m in members
-            if m.isfile() and m.name.startswith(target_prefix)
-        ]
-
-        if not matching_members and subpath:
-            # Try looser match if branch folder differed
-            matching_members = [
-                m for m in members
-                if m.isfile() and (f"/{subpath}/" in m.name or m.name.endswith(f"/{subpath}"))
-            ]
-            if matching_members:
-                first_name = matching_members[0].name
-                target_prefix = first_name.split(subpath)[0] + subpath + "/"
-
-        out_buf = io.BytesIO()
-        with zipfile.ZipFile(out_buf, "w", zipfile.ZIP_DEFLATED) as out_zip:
-            for m in matching_members:
-                f = tar.extractfile(m)
-                if f:
-                    rel_path = m.name[len(target_prefix):]
-                    if rel_path:
-                        out_zip.writestr(rel_path, f.read())
-
-        suggested_slug = os.path.basename(subpath) if subpath else repo
-        return out_buf.getvalue(), suggested_slug
+        raise ValueError(f"Failed to package repository from GitHub: HTTP {resp.status_code}")
