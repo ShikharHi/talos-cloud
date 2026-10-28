@@ -92,7 +92,7 @@ class MarketplaceRepository:
                         slug TEXT NOT NULL,
                         name TEXT NOT NULL,
                         description TEXT NOT NULL,
-                        plugin_type TEXT NOT NULL CHECK(plugin_type IN ('skill','mcp')),
+                        plugin_type TEXT NOT NULL CHECK(plugin_type IN ('skill','mcp','agent')),
                         publisher_id TEXT NOT NULL REFERENCES publishers(id) ON DELETE CASCADE,
                         latest_version TEXT DEFAULT '1.0.0',
                         icon_url TEXT,
@@ -110,6 +110,9 @@ class MarketplaceRepository:
                         updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                     );
                 """)
+                cur.execute("ALTER TABLE plugins DROP CONSTRAINT IF EXISTS plugins_plugin_type_check;")
+                cur.execute("ALTER TABLE plugins ADD CONSTRAINT plugins_plugin_type_check CHECK (plugin_type IN ('skill','mcp','agent'));")
+                cur.execute("ALTER TABLE plugins DROP CONSTRAINT IF EXISTS plugins_publisher_id_fkey;")
 
                 # 8. Plugin Versions
                 cur.execute("""

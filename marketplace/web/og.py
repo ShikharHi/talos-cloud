@@ -135,13 +135,15 @@ async def generate_plugin_og_image(
 async def generate_builder_og_image(
     username: str,
     display_name: str,
-    rating_avg: Optional[float],
-    plugin_count: int,
-    installs: int,
-    bio: str
+    badges: Optional[list[str]] = None,
+    rating_avg: Optional[float] = None,
+    plugin_count: int = 0,
+    installs: int = 0,
+    bio: str = ""
 ) -> bytes:
     """Generate builder OG image asynchronously in threadpool."""
+    rendered_badges = badges or []
     return await asyncio.to_thread(
         _render_builder_card_sync,
-        username, display_name, [], rating_avg, plugin_count, installs, bio
+        username, display_name, rendered_badges, rating_avg, plugin_count, installs, bio
     )
