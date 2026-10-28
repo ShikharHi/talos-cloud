@@ -4,7 +4,7 @@ import time
 import asyncio
 from typing import Any, AsyncGenerator, Dict, List, Optional, Union
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from auth import verify_internal_token
@@ -212,63 +212,53 @@ MODEL_CATALOG = {
     "talos-code": {
         "id": "talos-code",
         "capabilities": ["text", "code", "tool_calling", "streaming"],
-        "default_upstream": "mistral/codestral-2508",
-        "fallback_upstream": "openai/gpt-4o-mini"
+        "default_upstream": "mistral/codestral-2508"
     },
     "talos-general": {
         "id": "talos-general",
         "capabilities": ["text", "general_reasoning", "tool_calling", "streaming"],
-        "default_upstream": "mistral/mistral-medium-latest",
-        "fallback_upstream": "openai/gpt-4o-mini"
+        "default_upstream": "mistral/mistral-medium-latest"
     },
     "glm-5-2": {
         "id": "glm-5-2",
         "capabilities": ["text", "code", "tool_calling", "streaming"],
-        "default_upstream": "mistral/glm-5-2",
-        "fallback_upstream": "openai/gpt-4o-mini"
+        "default_upstream": "mistral/glm-5-2"
     },
     "zai-glm-5-3": {
         "id": "zai-glm-5-3",
         "capabilities": ["text", "code", "tool_calling", "streaming"],
-        "default_upstream": "mistral/zai-glm-5-3",
-        "fallback_upstream": "openai/gpt-4o-mini"
+        "default_upstream": "mistral/zai-glm-5-3"
     },
     "glm-5-3": {
         "id": "glm-5-3",
         "capabilities": ["text", "code", "tool_calling", "streaming"],
-        "default_upstream": "mistral/zai-glm-5-3",
-        "fallback_upstream": "openai/gpt-4o-mini"
+        "default_upstream": "mistral/zai-glm-5-3"
     },
     "mistral-medium-latest": {
         "id": "mistral-medium-latest",
         "capabilities": ["text", "general_reasoning", "tool_calling", "streaming"],
-        "default_upstream": "mistral/mistral-medium-latest",
-        "fallback_upstream": "openai/gpt-4o-mini"
+        "default_upstream": "mistral/mistral-medium-latest"
     },
     "mistral-large-2512": {
         "id": "mistral-large-2512",
         "capabilities": ["text", "complex_reasoning", "code", "tool_calling", "streaming"],
-        "default_upstream": "mistral/mistral-large-2512",
-        "fallback_upstream": "openai/gpt-4o-mini"
+        "default_upstream": "mistral/mistral-large-2512"
     },
     # Backward compatibility aliases
     "codestral-2508": {
         "id": "codestral-2508",
         "capabilities": ["text", "code", "tool_calling", "streaming"],
-        "default_upstream": "mistral/codestral-2508",
-        "fallback_upstream": "openai/gpt-4o-mini"
+        "default_upstream": "mistral/codestral-2508"
     },
     "codestral-latest": {
         "id": "codestral-latest",
         "capabilities": ["text", "code", "tool_calling", "streaming"],
-        "default_upstream": "mistral/codestral-latest",
-        "fallback_upstream": "openai/gpt-4o-mini"
+        "default_upstream": "mistral/codestral-latest"
     },
     "mistral-small-latest": {
         "id": "mistral-small-latest",
         "capabilities": ["text", "code", "tool_calling", "streaming"],
-        "default_upstream": "mistral/mistral-small-latest",
-        "fallback_upstream": "openai/gpt-4o-mini"
+        "default_upstream": "mistral/mistral-small-latest"
     }
 }
 
@@ -313,9 +303,11 @@ async def parse_and_sequence_sse(
     """
     sequence_id = 0
     buffer = ""
+    raw_capture = ""
     ttft_marked = False
     saw_data = False
     saw_done = False
+    saw_completion_chunk = False
 
     def validate_data(data_part: str) -> None:
         if data_part == "[DONE]":
@@ -323,13 +315,16 @@ async def parse_and_sequence_sse(
         try:
             payload = json.loads(data_part)
         except json.JSONDecodeError as exc:
-            clean = clean_upstream_error_text(data_part)
-            raise RuntimeError(f"Upstream returned a non-JSON SSE response: {clean}") from exc
+            raw_error = raw_upstream_error_text(data_part)
+            raise RuntimeError(f"Upstream returned a non-JSON SSE response: {raw_error}") from exc
         if not isinstance(payload, dict) or "choices" not in payload:
             raise RuntimeError("Upstream returned an invalid chat-completion stream event.")
 
     async for chunk in upstream_stream:
-        buffer += chunk.decode("utf-8", errors="replace")
+        decoded_chunk = chunk.decode("utf-8", errors="replace")
+        buffer += decoded_chunk
+        if len(raw_capture) < 32768:
+            raw_capture += decoded_chunk[:32768 - len(raw_capture)]
         
         while "\n" in buffer:
             line, buffer = buffer.split("\n", 1)
@@ -345,9 +340,13 @@ async def parse_and_sequence_sse(
                 
                 # Check for stream completion
                 if data_part == "[DONE]":
+                    if not saw_completion_chunk:
+                        raise RuntimeError("Upstream completed without returning a chat-completion response chunk.")
                     saw_done = True
                     yield f"id: {sequence_id}\nevent: done\ndata: [DONE]\n\n"
                     return
+
+                saw_completion_chunk = True
 
                 # Measure TTFT on first data chunk
                 if not ttft_marked and on_first_token:
@@ -364,41 +363,30 @@ async def parse_and_sequence_sse(
         validate_data(data_part)
         saw_data = True
         if data_part == "[DONE]":
+            if not saw_completion_chunk:
+                raise RuntimeError("Upstream completed without returning a chat-completion response chunk.")
             saw_done = True
             yield f"id: {sequence_id}\nevent: done\ndata: [DONE]\n\n"
         else:
+            saw_completion_chunk = True
             yield f"id: {sequence_id}\nevent: message\ndata: {data_part}\n\n"
 
     if not saw_data:
-        raise RuntimeError("Upstream closed without a valid chat-completion stream; it may have returned a WAF page.")
+        raise RuntimeError(
+            "Upstream returned no valid SSE data. Raw response body:\n" +
+            (raw_capture or "<empty response body>")
+        )
     if not saw_done:
         raise RuntimeError("Upstream ended the chat-completion stream without its completion marker.")
 
 # ---------------------------------------------------------------------------
-# Error Sanitizer for Upstream WAF / Gateways
+# Raw Error Body Preservation
 # ---------------------------------------------------------------------------
-def clean_upstream_error_text(raw_text: str, status_code: Optional[int] = None) -> str:
-    """Sanitize any raw HTML or WAF responses from upstream LLM vendors into clean text."""
+def raw_upstream_error_text(raw_text: str, status_code: Optional[int] = None) -> str:
+    """Preserve the provider's raw response body for direct error reporting."""
     if not raw_text:
         return f"Upstream error HTTP {status_code or 500}"
-    is_html = (
-        "<!doctype html" in raw_text.lower()
-        or "<html" in raw_text.lower()
-        or "<title>blocked</title>" in raw_text.lower()
-        or "<title>just a moment...</title>" in raw_text.lower()
-    )
-    if is_html:
-        import re
-        title_match = re.search(r"<title>(.*?)</title>", raw_text, re.IGNORECASE | re.DOTALL)
-        title = title_match.group(1).strip() if title_match else "Access Blocked"
-        code = status_code or 403
-        return f"Upstream WAF/Security Block (HTTP {code}: {title}) - Security Challenge Triggered"
-    
-    import re
-    cleaned = re.sub(r"<[^>]+>", "", raw_text).strip()
-    if len(cleaned) > 300:
-        cleaned = cleaned[:297] + "..."
-    return cleaned or f"Upstream HTTP {status_code or 500}"
+    return raw_text
 
 # ---------------------------------------------------------------------------
 # Main Relay Execution Endpoint
@@ -440,8 +428,8 @@ async def chat_completions(request: ChatCompletionRequest, raw_req: Request):
         provider_name = "openai"
         upstream_model = "gpt-4o-mini"
     else:
-        provider_name = "mock"
-        upstream_model = "talos-mock-engine"
+        provider_name = "none"
+        upstream_model = "none"
 
     # -----------------------------------------------------------------------
     # PATH A: Mistral Primary Route
@@ -467,7 +455,6 @@ async def chat_completions(request: ChatCompletionRequest, raw_req: Request):
                 success = False
                 error_msg = None
                 output_tokens = 0
-                failover_attempted = False
 
                 try:
                     async with httpx.AsyncClient(timeout=120.0) as client:
@@ -489,77 +476,9 @@ async def chat_completions(request: ChatCompletionRequest, raw_req: Request):
                             else:
                                 err_content = await upstream_resp.aread()
                                 raw_err = err_content.decode('utf-8', errors='ignore')
-                                error_msg = f"Mistral HTTP {upstream_resp.status_code}: {clean_upstream_error_text(raw_err, upstream_resp.status_code)}"
-                                
-                                # True Live Model Failover: Query secondary vendor before giving up
-                                if config.OPENAI_API_KEY:
-                                    try:
-                                        openai_payload = normalize_provider_payload(raw_payload, "openai")
-                                        openai_payload["model"] = "gpt-4o-mini"
-                                        openai_headers = {
-                                            "Authorization": f"Bearer {config.OPENAI_API_KEY}",
-                                            "Content-Type": "application/json"
-                                        }
-                                        async with client.stream(
-                                            "POST",
-                                            f"{config.OPENAI_BASE_URL}/chat/completions",
-                                            headers=openai_headers,
-                                            json=openai_payload
-                                        ) as fb_resp:
-                                            if fb_resp.status_code == 200:
-                                                async for formatted_sse in parse_and_sequence_sse(
-                                                    fb_resp.aiter_bytes(),
-                                                    request_id,
-                                                    on_first_token=record_ttft
-                                                ):
-                                                    output_tokens += 1
-                                                    yield formatted_sse
-                                                success = True
-                                                failover_attempted = True
-                                    except Exception as fb_exc:
-                                        error_msg += f" | Secondary failover error: {str(fb_exc)}"
+                                error_msg = f"Mistral HTTP {upstream_resp.status_code}: {raw_upstream_error_text(raw_err, upstream_resp.status_code)}"
                 except Exception as exc:
                     error_msg = f"Upstream Network Error: {str(exc)}"
-                    # Fail over on connection-level failures too. Previously the
-                    # secondary provider was only tried when Mistral returned a
-                    # non-200 response, so DNS/TLS/WAF exceptions skipped it.
-                    # Do not replay after yielding partial output to avoid
-                    # duplicating a response the client has already received.
-                    if output_tokens == 0 and config.OPENAI_API_KEY:
-                        try:
-                            openai_payload = normalize_provider_payload(raw_payload, "openai")
-                            openai_payload["model"] = "gpt-4o-mini"
-                            openai_headers = {
-                                "Authorization": f"Bearer {config.OPENAI_API_KEY}",
-                                "Content-Type": "application/json"
-                            }
-                            async with httpx.AsyncClient(timeout=120.0) as fallback_client:
-                                async with fallback_client.stream(
-                                    "POST",
-                                    f"{config.OPENAI_BASE_URL}/chat/completions",
-                                    headers=openai_headers,
-                                    json=openai_payload
-                                ) as fb_resp:
-                                    if fb_resp.status_code == 200:
-                                        async for formatted_sse in parse_and_sequence_sse(
-                                            fb_resp.aiter_bytes(),
-                                            request_id,
-                                            on_first_token=record_ttft
-                                        ):
-                                            output_tokens += 1
-                                            yield formatted_sse
-                                        success = True
-                                        failover_attempted = True
-                                        error_msg = None
-                                    else:
-                                        fb_error = await fb_resp.aread()
-                                        fb_text = fb_error.decode("utf-8", errors="ignore")
-                                        error_msg += (
-                                            f" | OpenAI fallback HTTP {fb_resp.status_code}: "
-                                            f"{clean_upstream_error_text(fb_text, fb_resp.status_code)}"
-                                        )
-                        except Exception as fb_exc:
-                            error_msg += f" | Secondary failover error: {str(fb_exc)}"
                 finally:
                     duration_ms = (time.time() - start_time) * 1000
                     status = "completed" if success else "failed"
@@ -574,7 +493,7 @@ async def chat_completions(request: ChatCompletionRequest, raw_req: Request):
                         latency_ms=duration_ms,
                         ttft_ms=ttft_time,
                         status=status,
-                        failover_used=failover_attempted,
+                        failover_used=False,
                         finish_reason="stop" if success else "error",
                         error=error_msg
                     ))
@@ -604,21 +523,16 @@ async def chat_completions(request: ChatCompletionRequest, raw_req: Request):
                             print(f"[BILLING ERROR] Failed to settle reservation {reservation_id}: {b_err}")
 
                 if not success and error_msg:
-                    # Graceful resilience response instead of crashing client stream
-                    fallback_content = (
-                        f"I am responding in resilient fallback mode because the upstream AI provider encountered a temporary service interruption ({error_msg}). "
-                        "Your request and workspace context are safely preserved."
-                    )
-                    fallback_payload = {
+                    error_payload = {
                         "id": request_id,
                         "object": "chat.completion.chunk",
                         "choices": [{
                             "index": 0,
-                            "delta": {"content": fallback_content},
+                            "delta": {"content": error_msg},
                             "finish_reason": "stop"
                         }]
                     }
-                    yield f"id: 1\nevent: message\ndata: {json.dumps(fallback_payload)}\n\n"
+                    yield f"id: 1\nevent: message\ndata: {json.dumps(error_payload)}\n\n"
                     yield "id: 2\nevent: done\ndata: [DONE]\n\n"
 
             return StreamingResponse(
@@ -671,39 +585,7 @@ async def chat_completions(request: ChatCompletionRequest, raw_req: Request):
                         ))
                         return data
                     else:
-                        clean_err = clean_upstream_error_text(resp.text, resp.status_code)
-                        # True Live Model Failover: Query secondary vendor before giving up
-                        if config.OPENAI_API_KEY:
-                            try:
-                                openai_payload = normalize_provider_payload(raw_payload, "openai")
-                                openai_payload["model"] = "gpt-4o-mini"
-                                openai_headers = {
-                                    "Authorization": f"Bearer {config.OPENAI_API_KEY}",
-                                    "Content-Type": "application/json"
-                                }
-                                fb_resp = await client.post(
-                                    f"{config.OPENAI_BASE_URL}/chat/completions",
-                                    headers=openai_headers,
-                                    json=openai_payload
-                                )
-                                if fb_resp.status_code == 200:
-                                    fb_data = fb_resp.json()
-                                    telemetry.record(UsageRecord(
-                                        request_id=request_id,
-                                        timestamp=time.time(),
-                                        provider="openai",
-                                        model=requested_model,
-                                        upstream_model="gpt-4o-mini",
-                                        input_tokens=input_tokens,
-                                        output_tokens=fb_data.get("usage", {}).get("completion_tokens", 10),
-                                        latency_ms=(time.time() - start_time) * 1000,
-                                        status="completed",
-                                        failover_used=True
-                                    ))
-                                    return fb_data
-                            except Exception:
-                                pass
-
+                        raw_err = resp.text or f"Upstream error HTTP {resp.status_code}"
                         telemetry.record(UsageRecord(
                             request_id=request_id,
                             timestamp=time.time(),
@@ -713,24 +595,13 @@ async def chat_completions(request: ChatCompletionRequest, raw_req: Request):
                             input_tokens=input_tokens,
                             output_tokens=0,
                             latency_ms=duration_ms,
-                            status="fallback",
-                            error=clean_err
+                            status="failed",
+                            error=raw_err
                         ))
-                        return {
-                            "id": request_id,
-                            "object": "chat.completion",
-                            "created": int(time.time()),
-                            "model": requested_model,
-                            "choices": [{
-                                "index": 0,
-                                "message": {
-                                    "role": "assistant",
-                                    "content": f"Operating in fallback mode: upstream service temporarily unavailable ({clean_err})."
-                                },
-                                "finish_reason": "stop"
-                            }],
-                            "usage": {"prompt_tokens": input_tokens, "completion_tokens": 10, "total_tokens": input_tokens + 10}
-                        }
+                        return JSONResponse(
+                            status_code=resp.status_code,
+                            content={"error": raw_err, "provider": "mistral", "model": requested_model}
+                        )
             except Exception as exc:
                 duration_ms = (time.time() - start_time) * 1000
                 telemetry.record(UsageRecord(
@@ -748,35 +619,158 @@ async def chat_completions(request: ChatCompletionRequest, raw_req: Request):
                 raise HTTPException(status_code=502, detail=f"Relay upstream connection failed: {str(exc)}")
 
     # -----------------------------------------------------------------------
-    # PATH B: Mock Fallback Route
+    # PATH B: OpenAI primary route (used when Mistral is not configured)
     # -----------------------------------------------------------------------
+    if provider_name == "openai":
+        openai_payload = normalize_provider_payload(raw_payload, "openai")
+        openai_payload["model"] = upstream_model
+        openai_headers = {
+            "Authorization": f"Bearer {config.OPENAI_API_KEY}",
+            "Content-Type": "application/json"
+        }
+
+        if request.stream:
+            async def openai_stream():
+                success = False
+                error_msg = None
+                output_tokens = 0
+                ttft_time: Optional[float] = None
+
+                def record_openai_ttft():
+                    nonlocal ttft_time
+                    if ttft_time is None:
+                        ttft_time = (time.time() - start_time) * 1000
+
+                try:
+                    async with httpx.AsyncClient(timeout=120.0) as client:
+                        async with client.stream(
+                            "POST",
+                            f"{config.OPENAI_BASE_URL}/chat/completions",
+                            headers=openai_headers,
+                            json=openai_payload
+                        ) as upstream_resp:
+                            if upstream_resp.status_code == 200:
+                                async for formatted_sse in parse_and_sequence_sse(
+                                    upstream_resp.aiter_bytes(), request_id, record_openai_ttft
+                                ):
+                                    output_tokens += 1
+                                    yield formatted_sse
+                                success = True
+                            else:
+                                raw_err = (await upstream_resp.aread()).decode("utf-8", errors="replace")
+                                error_msg = f"OpenAI HTTP {upstream_resp.status_code}: {raw_err}"
+                except Exception as exc:
+                    error_msg = str(exc) or repr(exc)
+                finally:
+                    telemetry.record(UsageRecord(
+                        request_id=request_id,
+                        timestamp=time.time(),
+                        provider="openai",
+                        model=requested_model,
+                        upstream_model=upstream_model,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        latency_ms=(time.time() - start_time) * 1000,
+                        ttft_ms=ttft_time,
+                        status="completed" if success else "failed",
+                        finish_reason="stop" if success else "error",
+                        error=error_msg
+                    ))
+
+                if not success and error_msg:
+                    error_payload = {
+                        "id": request_id,
+                        "object": "chat.completion.chunk",
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"content": error_msg},
+                            "finish_reason": "stop"
+                        }]
+                    }
+                    yield f"id: 1\nevent: message\ndata: {json.dumps(error_payload)}\n\n"
+                    yield "id: 2\nevent: done\ndata: [DONE]\n\n"
+
+            return StreamingResponse(
+                openai_stream(),
+                media_type="text/event-stream",
+                headers={
+                    "X-Talos-Relay-Provider": "openai",
+                    "X-Talos-Relay-Model": requested_model,
+                    "X-Talos-Request-Id": request_id
+                }
+            )
+
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                resp = await client.post(
+                    f"{config.OPENAI_BASE_URL}/chat/completions",
+                    headers=openai_headers,
+                    json=openai_payload
+                )
+            if resp.status_code == 200:
+                telemetry.record(UsageRecord(
+                    request_id=request_id,
+                    timestamp=time.time(),
+                    provider="openai",
+                    model=requested_model,
+                    upstream_model=upstream_model,
+                    input_tokens=input_tokens,
+                    output_tokens=resp.json().get("usage", {}).get("completion_tokens", 0),
+                    latency_ms=(time.time() - start_time) * 1000,
+                    status="completed"
+                ))
+                return resp.json()
+
+            raw_err = resp.text or f"OpenAI HTTP {resp.status_code}"
+            telemetry.record(UsageRecord(
+                request_id=request_id,
+                timestamp=time.time(),
+                provider="openai",
+                model=requested_model,
+                upstream_model=upstream_model,
+                input_tokens=input_tokens,
+                output_tokens=0,
+                latency_ms=(time.time() - start_time) * 1000,
+                status="failed",
+                error=raw_err
+            ))
+            return JSONResponse(
+                status_code=resp.status_code,
+                content={"error": raw_err, "provider": "openai", "model": requested_model}
+            )
+        except Exception as exc:
+            telemetry.record(UsageRecord(
+                request_id=request_id,
+                timestamp=time.time(),
+                provider="openai",
+                model=requested_model,
+                upstream_model=upstream_model,
+                input_tokens=input_tokens,
+                output_tokens=0,
+                latency_ms=(time.time() - start_time) * 1000,
+                status="failed",
+                error=str(exc)
+            ))
+            return JSONResponse(
+                status_code=502,
+                content={"error": str(exc) or repr(exc), "provider": "openai", "model": requested_model}
+            )
+
     duration_ms = (time.time() - start_time) * 1000
+    error_msg = "No upstream model provider is configured or enabled; no mock completion was generated."
     telemetry.record(UsageRecord(
         request_id=request_id,
         timestamp=time.time(),
-        provider="mock",
+        provider="none",
         model=requested_model,
-        upstream_model="talos-mock-engine",
+        upstream_model="none",
         input_tokens=input_tokens,
-        output_tokens=15,
+        output_tokens=0,
         latency_ms=duration_ms,
-        ttft_ms=50.0,
-        status="mocked"
+        status="failed",
+        error=error_msg
     ))
-    return {
-        "id": request_id,
-        "object": "chat.completion",
-        "created": int(time.time()),
-        "model": requested_model,
-        "choices": [
-            {
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": f"Response from Talos Cloud Relay (Mock Mode) to query: {request.messages[-1].content if request.messages else ''}"
-                },
-                "finish_reason": "stop"
-            }
-        ],
-        "usage": {"prompt_tokens": input_tokens, "completion_tokens": 15, "total_tokens": input_tokens + 15}
-    }
+    return JSONResponse(
+        status_code=503,
+        content={"error": error_msg, "provider": None, "model": requested_model}
+    )
