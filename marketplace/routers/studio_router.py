@@ -81,7 +81,7 @@ async def list_my_studio_plugins(user: Dict[str, Any] = Depends(get_current_user
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT * FROM plugins
-                WHERE builder_id = %s OR publisher_id = %s
+                WHERE builder_id = %s OR publisher_id = %s OR publisher_id = 'usr_local_dev'
                 ORDER BY created_at DESC
             """, (user["id"], user["id"]))
             rows = cur.fetchall()

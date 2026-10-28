@@ -975,6 +975,55 @@ async def unpublish_plugin(
     }
 
 
+class BatchDeletePluginsRequest(BaseModel):
+    plugin_ids: List[str]
+
+
+@router.post("/plugins/batch-delete")
+async def batch_delete_plugins(
+    payload: BatchDeletePluginsRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user_required),
+):
+    """
+    Batch delete/unpublish multiple plugins from the registry.
+    Only items owned by the authenticated publisher will be deleted.
+    """
+    user_id = current_user["id"]
+    deleted_ids: List[str] = []
+    errors: List[str] = []
+
+    for pid in payload.plugin_ids:
+        try:
+            deleted = await marketplace_repo.delete_plugin(pid, user_id)
+            if deleted:
+                deleted_ids.append(pid)
+                # Clean Tigris artifact if applicable
+                zip_path = deleted.get("zip_path")
+                if zip_path and zip_path.startswith("tigris://"):
+                    try:
+                        from marketplace.tigris_service import tigris_service
+                        key_part = zip_path.replace(f"tigris://{config.TIGRIS_BUCKET}/", "").lstrip("/")
+                        tigris_service.delete_object(key_part)
+                    except Exception:
+                        pass
+                elif zip_path and os.path.exists(zip_path):
+                    try:
+                        os.remove(zip_path)
+                    except Exception:
+                        pass
+        except Exception as e:
+            errors.append(f"{pid}: {str(e)}")
+
+    return {
+        "success": True,
+        "deleted_count": len(deleted_ids),
+        "deleted_ids": deleted_ids,
+        "errors": errors,
+        "message": f"Successfully deleted {len(deleted_ids)} plugin(s) from Marketplace."
+    }
+
+
+
 # ---------------------------------------------------------------------------
 # User's Installed Plugins
 # ---------------------------------------------------------------------------
