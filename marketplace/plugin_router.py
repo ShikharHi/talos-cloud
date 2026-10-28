@@ -349,6 +349,119 @@ async def list_plugins(
     return {"plugins": plugins, "count": len(plugins)}
 
 
+class GitHubInspectRequest(BaseModel):
+    url: str
+    token: Optional[str] = None
+
+
+class GitHubPackageRequest(BaseModel):
+    owner: str
+    repo: str
+    branch: Optional[str] = "main"
+    path: Optional[str] = ""
+    token: Optional[str] = None
+
+
+class GitHubInstallLocalRequest(BaseModel):
+    owner: str
+    repo: str
+    branch: Optional[str] = "main"
+    path: Optional[str] = ""
+    token: Optional[str] = None
+    slug: Optional[str] = None
+
+
+@router.post("/github/inspect")
+async def inspect_github_repo_endpoint(
+    payload: GitHubInspectRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user_required),
+):
+    """
+    Inspect a GitHub repository and discover skills (including multi-skill monorepos).
+    """
+    try:
+        from marketplace.github_service import inspect_github_skills
+        result = await inspect_github_skills(payload.url, payload.token)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/github/package")
+async def package_github_skill_endpoint(
+    payload: GitHubPackageRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user_required),
+):
+    """
+    Download a subfolder from GitHub and package it into a standard skill ZIP archive.
+    """
+    try:
+        from fastapi.responses import Response
+        from marketplace.github_service import package_github_skill
+        zip_bytes, suggested_slug = await package_github_skill(
+            owner=payload.owner,
+            repo=payload.repo,
+            branch=payload.branch or "main",
+            subpath=payload.path or "",
+            github_token=payload.token,
+        )
+        return Response(
+            content=zip_bytes,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f'attachment; filename="{suggested_slug}.zip"',
+                "X-Suggested-Slug": suggested_slug,
+            }
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/github/install-local")
+async def install_github_skill_local(
+    payload: GitHubInstallLocalRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user_required),
+):
+    """
+    Directly install a skill from GitHub into ~/.talos/skills/<slug>/ (like npx skills add).
+    """
+    try:
+        from marketplace.github_service import package_github_skill
+        from marketplace.router import DOT_TALOS_SKILLS_DIR, unpack_skill_zip
+        import tempfile
+
+        zip_bytes, suggested_slug = await package_github_skill(
+            owner=payload.owner,
+            repo=payload.repo,
+            branch=payload.branch or "main",
+            subpath=payload.path or "",
+            github_token=payload.token,
+        )
+
+        slug = payload.slug or suggested_slug or "custom-skill"
+        dest = os.path.join(DOT_TALOS_SKILLS_DIR, slug)
+        os.makedirs(dest, exist_ok=True)
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as tmp:
+            tmp.write(zip_bytes)
+            tmp_path = tmp.name
+
+        try:
+            unpack_skill_zip(tmp_path, dest)
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+        return {
+            "success": True,
+            "slug": slug,
+            "installed_path": dest,
+            "message": f"Skill installed directly into {dest}. Available to Talos immediately."
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 # ---------------------------------------------------------------------------
 # Publish Flow
 # ---------------------------------------------------------------------------
