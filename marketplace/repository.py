@@ -804,7 +804,19 @@ class MarketplaceRepository:
 
                 if existing:
                     if existing["publisher_id"] != publisher_id:
-                        raise ValueError("You do not own this plugin slug")
+                        # Slug claimed by another publisher: suffix with publisher handle so publishing never fails
+                        cur.execute("SELECT handle FROM publishers WHERE id = %s", (publisher_id,))
+                        pub_row = cur.fetchone()
+                        handle_suffix = pub_row["handle"] if pub_row and pub_row.get("handle") else uuid.uuid4().hex[:4]
+                        slug = f"{slug}-{handle_suffix}"
+                        # Check again with disambiguated slug
+                        cur.execute(
+                            "SELECT id, publisher_id FROM plugins WHERE slug = %s AND plugin_type = %s",
+                            (slug, plugin_type)
+                        )
+                        existing = cur.fetchone()
+
+                if existing and existing["publisher_id"] == publisher_id:
                     plugin_id = existing["id"]
                     cur.execute("""
                         UPDATE plugins SET name=%s, description=%s, latest_version=%s,
